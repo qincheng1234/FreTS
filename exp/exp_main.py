@@ -3,6 +3,7 @@ from exp.exp_basic import Exp_Basic
 from models import DLinear, NLinear, FreTS
 from utils.tools import EarlyStopping, adjust_learning_rate, visual, test_params_flop
 from utils.metrics import metric
+from FrequencyLoss import FrequencyRegularizedLoss
 
 import numpy as np
 import pandas as pd
@@ -44,7 +45,12 @@ class Exp_Main(Exp_Basic):
         return model_optim
 
     def _select_criterion(self):
-        criterion = nn.MSELoss()
+        # === [改进] 使用频域正则化损失 ===
+        criterion = FrequencyRegularizedLoss(
+            reg_lambda=self.args.reg_lambda,
+            in_channels=self.args.enc_in,
+            wavelet=self.args.wavelet
+        )
         return criterion
 
     def vali(self, vali_data, vali_loader, criterion):

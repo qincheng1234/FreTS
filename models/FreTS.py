@@ -12,7 +12,8 @@ class Model(nn.Module):
         self.feature_size = configs.enc_in #channels
         self.seq_length = configs.seq_len
         self.channel_independence = configs.channel_independence
-        self.sparsity_threshold = 0.01
+        # === [改进] 自适应稀疏阈值：初始化为 0.01，设为 Parameter 以便学习 ===
+        self.sparsity_threshold = nn.Parameter(torch.tensor(0.01))
         self.scale = 0.02
         self.embeddings = nn.Parameter(torch.randn(1, self.embed_size))
         self.r1 = nn.Parameter(self.scale * torch.randn(self.embed_size, self.embed_size))
@@ -81,7 +82,9 @@ class Model(nn.Module):
         )
 
         y = torch.stack([o1_real, o1_imag], dim=-1)
-        y = F.softshrink(y, lambd=self.sparsity_threshold)
+        # === [改进] 应用自适应软阈值，确保阈值非负 ===
+        threshold = F.relu(self.sparsity_threshold)
+        y = F.softshrink(y, lambd=threshold)
         y = torch.view_as_complex(y)
         return y
 
