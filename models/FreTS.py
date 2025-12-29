@@ -82,9 +82,12 @@ class Model(nn.Module):
         )
 
         y = torch.stack([o1_real, o1_imag], dim=-1)
-        # === [改进] 应用自适应软阈值，确保阈值非负 ===
+        # === [改进] 自定义可微软阈值函数，保持梯度流动 ===
+        # 确保阈值非负
         threshold = F.relu(self.sparsity_threshold)
-        y = F.softshrink(y, lambd=threshold)
+        # 自定义 softshrink: sign(x) * max(|x| - threshold, 0)
+        # 这完全等价于 F.softshrink，但支持 Tensor 类型的 threshold
+        y = torch.sign(y) * F.relu(torch.abs(y) - threshold)
         y = torch.view_as_complex(y)
         return y
 

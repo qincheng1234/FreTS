@@ -94,7 +94,7 @@ class Exp_Main(Exp_Basic):
 
                 loss = criterion(pred, true)
 
-                total_loss.append(loss)
+                total_loss.append(loss.item())
         total_loss = np.average(total_loss)
         self.model.train()
         return total_loss
