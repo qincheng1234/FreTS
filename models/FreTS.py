@@ -12,8 +12,8 @@ class Model(nn.Module):
         self.feature_size = configs.enc_in #channels
         self.seq_length = configs.seq_len
         self.channel_independence = configs.channel_independence
-        # === [改进] 自适应稀疏阈值：初始化为 0.01，设为 Parameter 以便学习 ===
-        self.sparsity_threshold = nn.Parameter(torch.tensor(0.01))
+        # === [改进] 自适应稀疏阈值：初始化为 0.02，设为 Parameter 以便学习 ===
+        self.sparsity_threshold = nn.Parameter(torch.tensor(0.02))
         self.scale = 0.02
         self.embeddings = nn.Parameter(torch.randn(1, self.embed_size))
         self.r1 = nn.Parameter(self.scale * torch.randn(self.embed_size, self.embed_size))
@@ -98,7 +98,7 @@ class Model(nn.Module):
         x = self.tokenEmb(x)
         bias = x
         # [B, N, T, D]
-        if self.channel_independence == '1':
+        if self.channel_independence == 1:
             x = self.MLP_channel(x, B, N, T)
         # [B, N, T, D]
         x = self.MLP_temporal(x, B, N, T)
