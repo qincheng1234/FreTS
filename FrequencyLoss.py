@@ -89,14 +89,14 @@ class MultiLevelWaveletDecompose(nn.Module):
 
 class FrequencyRegularizedLoss(nn.Module):
     """
-    频域正则化损失函数 (v3.0 - 多层小波分解)
+    频域正则化损失函数 (v4.0 - 可学习小波稀疏策略)
     
-    改进点：
-    1. 3层小波分解，对不同频段施加不同强度的约束
-    2. cD1 (极高频/噪声): 强约束 (weight=1.0)
-    3. cD2 (次高频/细节): 中等约束 (weight=0.5)
-    4. cD3 (中频/模式): 弱约束 (weight=0.1)
-    5. cA3 (低频/趋势): 不约束，交给时域MSE
+    核心改进：
+    1. 对每个频带 (cD1, cD2, cD3) 使用可学习的软阈值
+    2. cD1 (极高频/噪声): 初始阈值较大，倾向于强过滤
+    3. cD2 (次高频/细节): 初始阈值中等
+    4. cD3 (中频/模式): 初始阈值较小，保留更多信息
+    5. 稀疏损失：鼓励过滤后的高频系数趋近于零
     """
     def __init__(self, reg_lambda=0.01, in_channels=1, wavelet='db4', levels=3):
         super().__init__()
@@ -108,17 +108,32 @@ class FrequencyRegularizedLoss(nn.Module):
         # 多层小波分解
         self.mwd = MultiLevelWaveletDecompose(in_channels=in_channels, wavelet_name=wavelet, levels=levels)
         
-        # 各层频带的权重 (cD1最高频->最强约束, cD3中频->最弱约束)
-        # 用户可根据需要调整这些权重
+        # === 可学习的软阈值（替代模型内部的 softshrink）===
+        # 不同频带使用不同的初始阈值
+        self.threshold_cD1 = nn.Parameter(torch.tensor(0.05))  # 极高频 - 较大阈值
+        self.threshold_cD2 = nn.Parameter(torch.tensor(0.02))  # 次高频 - 中等阈值
+        self.threshold_cD3 = nn.Parameter(torch.tensor(0.01))  # 中频 - 较小阈值
+        
+        # 各层频带的损失权重
         self.detail_weights = {
-            'cD1': 1.0,   # 极高频/噪声 - 强约束
-            'cD2': 0.5,   # 次高频/细节 - 中等约束  
-            'cD3': 0.1,   # 中频/模式 - 弱约束
+            'cD1': 1.0,   # 极高频 - 强约束
+            'cD2': 0.5,   # 次高频 - 中等约束
+            'cD3': 0.1,   # 中频 - 弱约束
         }
         
         # Initial Scale Matching
         self.register_buffer('scale_factor', torch.tensor(1.0))
         self.scale_initialized = False
+    
+    def soft_threshold(self, x, threshold):
+        """
+        可学习的软阈值函数 (与 FreTS.py 中注释掉的函数一致)
+        softshrink(x, λ) = sign(x) * max(|x| - λ, 0)
+        """
+        # 确保阈值非负
+        threshold = F.relu(threshold)
+        # 自定义 softshrink
+        return torch.sign(x) * F.relu(torch.abs(x) - threshold)
 
     def forward(self, y_pred, y_true):
         # 维度调整：确保输入为 [Batch, Channel, Length]
@@ -135,14 +150,31 @@ class FrequencyRegularizedLoss(nn.Module):
         # 多层小波分解
         pred_coeffs = self.mwd(y_pred_t)
         true_coeffs = self.mwd(y_true_t)
+        
+        # 获取各层阈值
+        thresholds = {
+            'cD1': self.threshold_cD1,
+            'cD2': self.threshold_cD2,
+            'cD3': self.threshold_cD3,
+        }
 
-        # 加权频域损失 (只约束高频细节，不约束低频近似)
+        # === 可学习稀疏策略 ===
+        # 对预测值的高频系数施加软阈值，然后与真实值比较
         loss_freq = torch.tensor(0.0, device=y_pred.device)
+        
         for level in range(1, self.levels + 1):
             key = f'cD{level}'
             if key in self.detail_weights:
                 weight = self.detail_weights[key]
-                level_loss = F.mse_loss(pred_coeffs[key], true_coeffs[key])
+                threshold = thresholds.get(key, self.threshold_cD1)
+                
+                # 对预测值的细节系数施加软阈值（去噪/稀疏化）
+                pred_filtered = self.soft_threshold(pred_coeffs[key], threshold)
+                # 对真实值也施加同样的阈值（保持一致性）
+                true_filtered = self.soft_threshold(true_coeffs[key], threshold)
+                
+                # 计算过滤后的匹配损失
+                level_loss = F.mse_loss(pred_filtered, true_filtered)
                 loss_freq = loss_freq + weight * level_loss
 
         # Initial Scale Matching
@@ -153,10 +185,12 @@ class FrequencyRegularizedLoss(nn.Module):
                 else:
                     self.scale_factor = torch.tensor(1.0, device=y_pred.device)
                 self.scale_initialized = True
-                print(f"[Multi-Level DWT] wavelet={self.wavelet}, levels={self.levels}")
+                print(f"[Multi-Level DWT + Learnable Thresholds] wavelet={self.wavelet}, levels={self.levels}")
+                print(f"  Initial thresholds: cD1={F.relu(self.threshold_cD1).item():.4f}, cD2={F.relu(self.threshold_cD2).item():.4f}, cD3={F.relu(self.threshold_cD3).item():.4f}")
                 print(f"[Initial Scale Matching] L_time={loss_time.item():.6f}, L_freq={loss_freq.item():.6f}, scale_factor={self.scale_factor.item():.4f}")
 
         # 最终损失
         loss_total = loss_time + self.reg_lambda * self.scale_factor * loss_freq
         
         return loss_total
+
