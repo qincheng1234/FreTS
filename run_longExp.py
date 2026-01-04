@@ -46,7 +46,8 @@ parser.add_argument('--c_out', type=int, default=7, help='output size') # 输出
 parser.add_argument('--d_model', type=int, default=512, help='dimension of model') # 模型隐藏层维度：内部特征向量的大小（在FreTS中对应 embed_size）
 # === [新增] 频域正则化参数 ===
 parser.add_argument('--reg_lambda', type=float, default=0.01, help='frequency regularization weight') # 频域正则化权重：控制频域损失的强度
-parser.add_argument('--wavelet', type=str, default='haar', help='wavelet type: haar or db2') # 小波类型：haar 或 db2
+parser.add_argument('--wavelet', type=str, default='haar', help='wavelet type: haar or db2') # 小波类型：haar 或 db2（保留兼容性）
+parser.add_argument('--n_bins', type=int, default=16, help='number of bins for BSP Loss') # BSP分箱数：建议16或32
 # ===========================
 parser.add_argument('--n_heads', type=int, default=8, help='num of heads') # 多头注意力头数：Transformer类模型用，FreTS不用
 parser.add_argument('--e_layers', type=int, default=2, help='num of encoder layers') # Encoder层数：Transformer类模型用

@@ -3,7 +3,7 @@ from exp.exp_basic import Exp_Basic
 from models import DLinear, NLinear, FreTS
 from utils.tools import EarlyStopping, adjust_learning_rate, visual, test_params_flop
 from utils.metrics import metric
-from FrequencyLoss import FrequencyRegularizedLoss
+from FrequencyLoss import FrequencyRegularizedLoss, UniversalFrequencyLoss
 
 import numpy as np
 import pandas as pd
@@ -45,11 +45,11 @@ class Exp_Main(Exp_Basic):
         return model_optim
 
     def _select_criterion(self):
-        # === [改进] 使用频域正则化损失 ===
-        criterion = FrequencyRegularizedLoss(
+        # === [改进] 使用通用频域损失 (BSP Loss) ===
+        criterion = UniversalFrequencyLoss(
             reg_lambda=self.args.reg_lambda,
-            in_channels=self.args.enc_in,
-            wavelet=self.args.wavelet
+            n_bins=getattr(self.args, 'n_bins', 16),
+            in_channels=self.args.enc_in
         )
         return criterion
 
