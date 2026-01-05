@@ -3,7 +3,7 @@ from exp.exp_basic import Exp_Basic
 from models import DLinear, NLinear, FreTS
 from utils.tools import EarlyStopping, adjust_learning_rate, visual, test_params_flop
 from utils.metrics import metric
-from FrequencyLoss import FrequencyRegularizedLoss, UniversalFrequencyLoss
+# from FrequencyLoss import UniversalFrequencyLoss  # 已移除频域损失
 
 import numpy as np
 import pandas as pd
@@ -45,15 +45,13 @@ class Exp_Main(Exp_Basic):
         return model_optim
 
     def _select_criterion(self):
-        # === [改进] 使用通用频域损失 (BSP Loss) ===
-        criterion = UniversalFrequencyLoss(
-            reg_lambda=self.args.reg_lambda,
-            n_bins=getattr(self.args, 'n_bins', 16),
-            in_channels=self.args.enc_in
-        )
+        """选择损失函数"""
+        # 纯 MSE Loss（时域损失）
+        criterion = nn.MSELoss()
         return criterion
 
     def vali(self, vali_data, vali_loader, criterion):
+        """验证函数"""
         total_loss = []
         self.model.eval()
         with torch.no_grad():
@@ -67,6 +65,7 @@ class Exp_Main(Exp_Basic):
                 # decoder input
                 dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
+                
                 # encoder - decoder
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
@@ -85,6 +84,7 @@ class Exp_Main(Exp_Basic):
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                         else:
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, f_dim:]
                 batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
@@ -122,7 +122,22 @@ class Exp_Main(Exp_Basic):
             if not parameter.requires_grad: continue
             param = parameter.numel()
             total_params += param
-        print(f"Total Trainable Params: {total_params}")
+        
+        # === 训练配置摘要 ===
+        print("\n" + "="*60)
+        print("                    TRAINING CONFIGURATION")
+        print("="*60)
+        print(f"  Model:           {self.args.model}")
+        print(f"  Dataset:         {self.args.data}")
+        print(f"  Seq/Pred Len:    {self.args.seq_len} -> {self.args.pred_len}")
+        print(f"  Batch Size:      {self.args.batch_size}")
+        print(f"  Learning Rate:   {self.args.learning_rate}")
+        print(f"  Train Epochs:    {self.args.train_epochs}")
+        print(f"  Total Params:    {total_params:,}")
+        print("-"*60)
+        print(f"  [Loss] reg_lambda:   {self.args.reg_lambda}")
+        print(f"  [Loss] n_bins:       {getattr(self.args, 'n_bins', 8)}")
+        print("="*60 + "\n")
 
         if self.args.use_amp:
             scaler = torch.cuda.amp.GradScaler()
@@ -170,7 +185,7 @@ class Exp_Main(Exp_Basic):
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                         else:
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, batch_y)
-                    # print(outputs.shape,batch_y.shape)
+                    
                     f_dim = -1 if self.args.features == 'MS' else 0
                     outputs = outputs[:, -self.args.pred_len:, f_dim:]
                     batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
@@ -178,10 +193,9 @@ class Exp_Main(Exp_Basic):
                     train_loss.append(loss.item())
 
                 if (i + 1) % 100 == 0:
-                    print("\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, loss.item()))
                     speed = (time.time() - time_now) / iter_count
                     left_time = speed * ((self.args.train_epochs - epoch) * train_steps - i)
-                    print('\tspeed: {:.4f}s/iter; left time: {:.4f}s'.format(speed, left_time))
+                    print(f"  [Epoch {epoch+1:02d}] Iter {i+1:4d}/{train_steps} | loss={loss.item():.5f} | {speed:.3f}s/iter | ETA: {left_time/60:.1f}min")
                     iter_count = 0
                     time_now = time.time()
 
@@ -193,22 +207,28 @@ class Exp_Main(Exp_Basic):
                     loss.backward()
                     model_optim.step()
 
-            print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
+            epoch_cost = time.time() - epoch_time
             train_loss = np.average(train_loss)
+            
+            print("\n" + "-"*60)
             if not self.args.train_only:
                 vali_loss = self.vali(vali_data, vali_loader, criterion)
                 test_loss = self.vali(test_data, test_loader, criterion)
 
-                print("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Vali Loss: {3:.7f} Test Loss: {4:.7f}".format(
-                    epoch + 1, train_steps, train_loss, vali_loss, test_loss))
+                print(f"  [Epoch {epoch+1:02d}] Summary | Time: {epoch_cost:.1f}s")
+                print(f"    Train Loss: {train_loss:.6f}")
+                print(f"    Vali  Loss: {vali_loss:.6f}")
+                print(f"    Test  Loss: {test_loss:.6f}")
                 early_stopping(vali_loss, self.model, path)
             else:
-                print("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f}".format(
-                    epoch + 1, train_steps, train_loss))
+                print(f"  [Epoch {epoch+1:02d}] Summary | Train Loss: {train_loss:.6f} | Time: {epoch_cost:.1f}s")
                 early_stopping(train_loss, self.model, path)
+            print("-"*60)
 
             if early_stopping.early_stop:
-                print("Early stopping")
+                print("\n" + "*"*60)
+                print("  EARLY STOPPING TRIGGERED")
+                print("*"*60)
                 break
 
             adjust_learning_rate(model_optim, epoch + 1, self.args)
@@ -265,6 +285,7 @@ class Exp_Main(Exp_Basic):
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
 
                 f_dim = -1 if self.args.features == 'MS' else 0
+                
                 # print(outputs.shape,batch_y.shape)
                 outputs = outputs[:, -self.args.pred_len:, f_dim:]
                 batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
@@ -353,6 +374,7 @@ class Exp_Main(Exp_Basic):
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                         else:
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                
                 pred = outputs.detach().cpu().numpy()  # .squeeze()
                 preds.append(pred)
 

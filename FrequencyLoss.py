@@ -3,6 +3,46 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def get_trend(y, kernel_size=25):
+    """
+    从时间序列中提取趋势分量（低通滤波）
+    
+    使用平均池化模拟低通滤波，用于生成 Guide Loss 的目标。
+    趋势分量代表序列的"主旋律"，不含高频噪声/细节。
+    
+    Args:
+        y: [Batch, Length, Channel] 输入序列
+        kernel_size: 平均池化窗口大小（越大越平滑）
+    
+    Returns:
+        y_trend: [Batch, Length, Channel] 趋势分量
+    """
+    # [B, L, C] -> [B, C, L] 用于 1D 池化
+    y_in = y.permute(0, 2, 1)
+    L = y_in.shape[-1]
+    
+    # 动态调整 kernel_size，确保不超过序列长度
+    actual_kernel = min(kernel_size, L)
+    if actual_kernel % 2 == 0:  # 确保是奇数
+        actual_kernel = max(1, actual_kernel - 1)
+    
+    pad = actual_kernel // 2
+    
+    # 动态选择 padding 模式：短序列用 replicate 避免 crash
+    if L <= pad:
+        mode = 'replicate'
+    else:
+        mode = 'reflect'
+    
+    y_padded = F.pad(y_in, (pad, pad), mode=mode)
+    
+    # 平均池化提取趋势
+    y_trend = F.avg_pool1d(y_padded, kernel_size=actual_kernel, stride=1)
+    
+    # [B, C, L] -> [B, L, C]
+    return y_trend.permute(0, 2, 1)
+
+
 class ImprovedBSPLoss(nn.Module):
     """
     改进版分箱谱功率损失 (Improved Binned Spectral Power Loss)
@@ -180,8 +220,7 @@ class UniversalFrequencyLoss(nn.Module):
                     self.ema_bsp = loss_bsp.detach().clamp(min=1e-8)
                     self.scale_factor = self.ema_time / self.ema_bsp
                     self.scale_initialized = True
-                    print(f"[Universal Frequency Loss] n_bins={self.bsp_loss.n_bins}, reg_lambda={self.reg_lambda}")
-                    print(f"[Initial Scale] L_time={loss_time.item():.6f}, L_bsp={loss_bsp.item():.6f}, scale_factor={self.scale_factor.item():.4f}")
+                    print(f"  [FreqLoss] Initialized | L_time={loss_time.item():.5f}, L_bsp={loss_bsp.item():.5f}, scale={self.scale_factor.item():.3f}")
                 else:
                     # EMA 更新
                     self.ema_time = self.ema_momentum * self.ema_time + (1 - self.ema_momentum) * loss_time.detach()
@@ -189,9 +228,9 @@ class UniversalFrequencyLoss(nn.Module):
                     self.scale_factor = self.ema_time / self.ema_bsp
                 
                 self.step_count += 1
-                # 每 500 步打印一次监控信息
-                if self.step_count % 500 == 0:
-                    print(f"[Step {self.step_count}] L_time={loss_time.item():.6f}, L_bsp={loss_bsp.item():.6f}, scale={self.scale_factor.item():.4f}")
+                # 每 1000 步打印一次监控信息（降低频率避免日志过多）
+                if self.step_count % 1000 == 0:
+                    print(f"  [FreqLoss] Step {self.step_count:5d} | L_time={loss_time.item():.5f}, L_bsp={loss_bsp.item():.5f}, scale={self.scale_factor.item():.3f}")
         
         # 最终损失：时域为主，频域为辅
         loss_total = loss_time + self.reg_lambda * self.scale_factor * loss_bsp
