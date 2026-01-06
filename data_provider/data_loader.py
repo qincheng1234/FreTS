@@ -55,11 +55,11 @@ class Dataset_ETT_hour(Dataset):
         elif self.features == 'S':
             df_data = df_raw[[self.target]]
 
-        mms = MinMaxScaler(feature_range=(0, 1))
+        # StandardScaler (对标 CSformer/iTransformer 基准)
         if self.scale:
             train_data = df_data[border1s[0]:border2s[0]]
-            mms.fit(train_data.values)
-            data = mms.transform(df_data.values)
+            self.scaler.fit(train_data.values)
+            data = self.scaler.transform(df_data.values)
         else:
             data = df_data.values
 
@@ -96,14 +96,13 @@ class Dataset_ETT_hour(Dataset):
         return len(self.data_x) - self.seq_len - self.pred_len + 1
 
     def inverse_transform(self, data):
-        mms = MinMaxScaler(feature_range=(0, 1))
-        return mms.fit_transform(data.cpu())
+        return self.scaler.inverse_transform(data)
 
 
 class Dataset_ETT_minute(Dataset):
     def __init__(self, root_path, flag='train', size=None,
                  features='S', data_path='ETTm1.csv',
-                 target='OT', scale=True, timeenc=0, freq='t'):
+                 target='OT', scale=True, timeenc=0, freq='t', train_only=False):
         # size [seq_len, label_len, pred_len]
         # info
         if size == None:
@@ -246,12 +245,11 @@ class Dataset_Covid(Dataset):
             df_raw = df_raw[['date'] + cols + [self.target]]
             df_data = df_raw[[self.target]]
 
-        ## min max scaler
-        mms = MinMaxScaler(feature_range=(0, 1))
+        # StandardScaler (对标 CSformer/iTransformer 基准)
         if self.scale:
             train_data = df_data[border1s[0]:border2s[0]]
-            mms.fit(train_data.values)
-            data = mms.transform(df_data.values)
+            self.scaler.fit(train_data.values)
+            data = self.scaler.transform(df_data.values)
         else:
             data = df_data.values
 
@@ -288,10 +286,9 @@ class Dataset_Covid(Dataset):
         return len(self.data_x) - self.seq_len - self.pred_len + 1
 
     def inverse_transform(self, data):
-        mms = MinMaxScaler(feature_range=(0, 1))
-        return mms.fit_transform(data.cpu())
+        return self.scaler.inverse_transform(data)
 
-#min max scaler
+# StandardScaler (对标 CSformer/iTransformer 基准)
 class Dataset_Custom_(Dataset):
     def __init__(self, root_path, flag='train', size=None,
                  features='S', data_path='ETTh1.csv',
@@ -349,12 +346,11 @@ class Dataset_Custom_(Dataset):
             df_raw = df_raw[['date'] + cols + [self.target]]
             df_data = df_raw[[self.target]]
 
-        ## min max scaler
-        mms = MinMaxScaler(feature_range=(0, 1))
+        # StandardScaler (对标 CSformer/iTransformer 基准)
         if self.scale:
             train_data = df_data[border1s[0]:border2s[0]]
-            mms.fit(train_data.values)
-            data = mms.transform(df_data.values)
+            self.scaler.fit(train_data.values)
+            data = self.scaler.transform(df_data.values)
         else:
             data = df_data.values
 
@@ -391,14 +387,12 @@ class Dataset_Custom_(Dataset):
         return len(self.data_x) - self.seq_len - self.pred_len + 1
 
     def inverse_transform(self, data):
-        mms = MinMaxScaler(feature_range=(0, 1))
-        return mms.fit_transform(data.cpu())
-        #return self.scaler.inverse_transform(data)
+        return self.scaler.inverse_transform(data)
 
 class Dataset_Custom(Dataset):
     def __init__(self, root_path, flag='train', size=None,
                  features='S', data_path='ETTh1.csv',
-                 target='OT', scale=False, timeenc=0, freq='h', train_only=False):
+                 target='OT', scale=True, timeenc=0, freq='h', train_only=False):
 
         if size == None:
             self.seq_len = 24 * 4 * 4

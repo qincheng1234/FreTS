@@ -28,13 +28,19 @@ class Exp_Main(Exp_Basic):
         model_dict = {
             'DLinear': DLinear,
             'NLinear': NLinear,
-            'FreLinear': FreTS
+            'FreLinear': FreTS,
+            'FreTS': FreTS  # 支持两种命名
         }
         model = model_dict[self.args.model].Model(self.args).float()
 
         if self.args.use_multi_gpu and self.args.use_gpu:
             model = nn.DataParallel(model, device_ids=self.args.device_ids)
         return model
+
+    def _is_simple_model(self):
+        """判断是否为简单模型（只需要 batch_x 输入）"""
+        simple_models = ['Linear', 'FreTS', 'FreLinear']
+        return any(m in self.args.model for m in simple_models)
 
     def _get_data(self, flag):
         data_set, data_loader = data_provider(self.args, flag)
@@ -69,7 +75,7 @@ class Exp_Main(Exp_Basic):
                 # encoder - decoder
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
-                        if 'Linear' in self.args.model:
+                        if self._is_simple_model():
                             outputs = self.model(batch_x)
                         else:
                             if self.args.output_attention:
@@ -77,7 +83,7 @@ class Exp_Main(Exp_Basic):
                             else:
                                 outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 else:
-                    if 'Linear' in self.args.model:
+                    if self._is_simple_model():
                         outputs = self.model(batch_x)
                     else:
                         if self.args.output_attention:
@@ -134,9 +140,9 @@ class Exp_Main(Exp_Basic):
         print(f"  Learning Rate:   {self.args.learning_rate}")
         print(f"  Train Epochs:    {self.args.train_epochs}")
         print(f"  Total Params:    {total_params:,}")
-        print("-"*60)
-        print(f"  [Loss] reg_lambda:   {self.args.reg_lambda}")
-        print(f"  [Loss] n_bins:       {getattr(self.args, 'n_bins', 8)}")
+        print(f"  d_model:         {getattr(self.args, 'd_model', 128)}")
+        print(f"  n_heads:         {getattr(self.args, 'n_heads', 4)}")
+        print(f"  e_layers:        {getattr(self.args, 'e_layers', 2)}")
         print("="*60 + "\n")
 
         if self.args.use_amp:
@@ -164,7 +170,7 @@ class Exp_Main(Exp_Basic):
                 # encoder - decoder
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
-                        if 'Linear' in self.args.model:
+                        if self._is_simple_model():
                             outputs = self.model(batch_x)
                         else:
                             if self.args.output_attention:
@@ -178,13 +184,13 @@ class Exp_Main(Exp_Basic):
                         loss = criterion(outputs, batch_y)
                         train_loss.append(loss.item())
                 else:
-                    if 'Linear' in self.args.model:
-                            outputs = self.model(batch_x)
+                    if self._is_simple_model():
+                        outputs = self.model(batch_x)
                     else:
                         if self.args.output_attention:
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                         else:
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, batch_y)
+                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                     
                     f_dim = -1 if self.args.features == 'MS' else 0
                     outputs = outputs[:, -self.args.pred_len:, f_dim:]
@@ -219,6 +225,7 @@ class Exp_Main(Exp_Basic):
                 print(f"    Train Loss: {train_loss:.6f}")
                 print(f"    Vali  Loss: {vali_loss:.6f}")
                 print(f"    Test  Loss: {test_loss:.6f}")
+                
                 early_stopping(vali_loss, self.model, path)
             else:
                 print(f"  [Epoch {epoch+1:02d}] Summary | Train Loss: {train_loss:.6f} | Time: {epoch_cost:.1f}s")
@@ -267,7 +274,7 @@ class Exp_Main(Exp_Basic):
                 # encoder - decoder
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
-                        if 'Linear' in self.args.model:
+                        if self._is_simple_model():
                             outputs = self.model(batch_x)
                         else:
                             if self.args.output_attention:
@@ -275,12 +282,11 @@ class Exp_Main(Exp_Basic):
                             else:
                                 outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 else:
-                    if 'Linear' in self.args.model:
-                            outputs = self.model(batch_x)
+                    if self._is_simple_model():
+                        outputs = self.model(batch_x)
                     else:
                         if self.args.output_attention:
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
-
                         else:
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
 
@@ -359,7 +365,7 @@ class Exp_Main(Exp_Basic):
                 # encoder - decoder
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
-                        if 'Linear' in self.args.model:
+                        if self._is_simple_model():
                             outputs = self.model(batch_x)
                         else:
                             if self.args.output_attention:
@@ -367,7 +373,7 @@ class Exp_Main(Exp_Basic):
                             else:
                                 outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 else:
-                    if 'Linear' in self.args.model:
+                    if self._is_simple_model():
                         outputs = self.model(batch_x)
                     else:
                         if self.args.output_attention:

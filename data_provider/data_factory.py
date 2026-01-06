@@ -1,9 +1,11 @@
-from data_provider.data_loader import Dataset_Covid, Dataset_Custom, Dataset_Pred, Dataset_Custom_
+from data_provider.data_loader import Dataset_Covid, Dataset_Custom, Dataset_Pred, Dataset_Custom_, Dataset_ETT_hour, Dataset_ETT_minute
 from torch.utils.data import DataLoader
 
 data_dict = {
-    'ETTh1': Dataset_Custom_,#Dataset_ETT_hour,
-    'ETTm1': Dataset_Custom_,
+    'ETTh1': Dataset_ETT_hour,   # 使用标准 ETT 小时数据集类
+    'ETTh2': Dataset_ETT_hour,
+    'ETTm1': Dataset_ETT_minute, # 使用标准 ETT 分钟数据集类 (StandardScaler + 12/4/4 月划分)
+    'ETTm2': Dataset_ETT_minute,
     'traffic': Dataset_Custom,
     'electricity': Dataset_Custom_,
     'exchange': Dataset_Custom_,
