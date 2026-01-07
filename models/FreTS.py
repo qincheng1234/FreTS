@@ -144,27 +144,86 @@ class SharedMultiHeadAttention(nn.Module):
         return self.out_proj(out)
 
 
+class TemporalMLP(nn.Module):
+    """
+    [新增] 时间维 MLP - 替代 Sequence Attention
+    
+    设计灵感：
+    - iTransformer: 将时间步视为 token，在时间维上做 FFN
+    - DLinear: 简单的线性层直接映射时间序列
+    - TSMixer: Time-MLP 用于捕获时序依赖
+    
+    优势：
+    1. 计算复杂度 O(T) vs Attention 的 O(T²)
+    2. 无需位置编码，因为 MLP 隐式建模时序位置
+    3. 参数量更少，更不容易过拟合
+    """
+    def __init__(self, seq_len, d_model, expansion_factor=2, dropout=0.1):
+        super().__init__()
+        hidden_dim = int(seq_len * expansion_factor)
+        
+        # 时间维 MLP: [B*N, T, D] -> 转置 -> [B*N, D, T] -> MLP -> 转置回来
+        self.temporal_fc = nn.Sequential(
+            nn.Linear(seq_len, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, seq_len),
+            nn.Dropout(dropout)
+        )
+        self.norm = nn.LayerNorm(d_model)
+    
+    def forward(self, x):
+        # x: [B, N, T, D]
+        B, N, T, D = x.shape
+        
+        # Reshape and transpose for temporal mixing
+        x_reshaped = x.reshape(B * N, T, D)  # [B*N, T, D]
+        x_norm = self.norm(x_reshaped)
+        
+        # Transpose to apply MLP along time dimension
+        x_t = x_norm.transpose(1, 2)  # [B*N, D, T]
+        x_t = self.temporal_fc(x_t)   # [B*N, D, T]
+        x_out = x_t.transpose(1, 2)   # [B*N, T, D]
+        
+        # Residual connection
+        x_out = x_reshaped + x_out
+        return x_out.reshape(B, N, T, D)
+
+
 class CSformerLayer(nn.Module):
     """
-    [替代 TimeDomainMixer] CSformer 两阶段注意力层
-    Stage 1: Channel MSA (通道混合) - 捕捉变量间动态相关性
-    Stage 2: Sequence MSA (时序混合) - 捕捉时间依赖
-    Stage 3: Feed Forward (特征变换)
+    [改进版] CSformer 混合层 - 将 Sequence Attention 替换为 Temporal MLP
     
-    采用 Pre-Norm 结构，与 CSformer 原论文一致
+    支持两种混合顺序：
+    - 'cm': Channel Attention → Temporal MLP (类似 CSformer 原设计)
+    - 'mc': Temporal MLP → Channel Attention (先做时序汇聚再做通道交互)
+    
+    设计理念：
+    - Channel Attention: 动态建模通道间的全局依赖关系
+    - Temporal MLP: 高效的时序位置感知混合（类似 DLinear/iTransformer）
+    
+    优势：
+    1. 降低计算复杂度: O(N²·T + N·T) vs O(N²·T + T²·N)
+    2. 减少参数量和过拟合风险
+    3. TimeMLP 对周期性模式的捕获更直接
+    
+    采用 Pre-Norm 结构，提升训练稳定性
     """
-    def __init__(self, d_model, n_heads, d_ff, dropout=0.1):
+    def __init__(self, d_model, n_heads, d_ff, seq_len, dropout=0.1, attention_order='cm'):
         super().__init__()
+        self.attention_order = attention_order
         
-        # 共享的 Attention 模块
-        self.shared_attn = SharedMultiHeadAttention(d_model, n_heads, dropout)
-        
-        # Pre-Norm (Layer Norm before Attention)
+        # Channel Attention 模块
+        self.channel_attn = SharedMultiHeadAttention(d_model, n_heads, dropout)
         self.norm_channel = nn.LayerNorm(d_model)
-        self.norm_seq = nn.LayerNorm(d_model)
+        
+        # Temporal MLP 模块 (替代 Sequence Attention)
+        self.temporal_mlp = TemporalMLP(seq_len, d_model, expansion_factor=2, dropout=dropout)
+        
+        # Final Layer Norm
         self.norm_ff = nn.LayerNorm(d_model)
         
-        # Feed Forward Network
+        # Feed Forward Network (通道维度)
         self.ff = nn.Sequential(
             nn.Linear(d_model, d_ff),
             nn.GELU(),
@@ -174,36 +233,34 @@ class CSformerLayer(nn.Module):
         )
         self.dropout = nn.Dropout(dropout)
 
+    def _channel_attention(self, x):
+        """Channel MSA: 通道混合"""
+        B, N, T, D = x.shape
+        x_c = x.permute(0, 2, 1, 3).reshape(B * T, N, D)
+        x_c_norm = self.norm_channel(x_c)
+        attn_out = self.channel_attn(x_c_norm)
+        x_c = x_c + self.dropout(attn_out)
+        return x_c.reshape(B, T, N, D).permute(0, 2, 1, 3)
+    
+    def _temporal_mixing(self, x):
+        """Temporal MLP: 时序混合"""
+        return self.temporal_mlp(x)
+
     def forward(self, x):
         # Input x: [Batch, Channel(N), Time(T), D_model]
-        B, N, T, D = x.shape
         
-        # === Stage 1: Channel MSA (Channel Mixing) ===
-        # CSformer 建议先 Channel 后 Sequence
-        # Reshape to [Batch * Time, Channel, D]
-        x_c = x.permute(0, 2, 1, 3).reshape(B * T, N, D)
+        if self.attention_order == 'cm':
+            # Channel Attention → Temporal MLP
+            # 适合通道相关性强的数据，先汇聚通道信息再做时序混合
+            x = self._channel_attention(x)
+            x = self._temporal_mixing(x)
+        else:  # 'mc'
+            # Temporal MLP → Channel Attention  
+            # 适合时序模式先于通道交互的场景
+            x = self._temporal_mixing(x)
+            x = self._channel_attention(x)
         
-        # Pre-Norm + Attention + Residual
-        x_c_norm = self.norm_channel(x_c)
-        attn_out = self.shared_attn(x_c_norm)
-        x_c = x_c + self.dropout(attn_out)
-        
-        # Restore shape: [B, T, N, D] -> [B, N, T, D]
-        x = x_c.reshape(B, T, N, D).permute(0, 2, 1, 3)
-        
-        # === Stage 2: Sequence MSA (Temporal Mixing) ===
-        # Reshape to [Batch * Channel, Time, D]
-        x_s = x.reshape(B * N, T, D)
-        
-        # Pre-Norm + Attention + Residual
-        x_s_norm = self.norm_seq(x_s)
-        attn_out = self.shared_attn(x_s_norm)
-        x_s = x_s + self.dropout(attn_out)
-        
-        # Restore shape: [B, N, T, D]
-        x = x_s.reshape(B, N, T, D)
-        
-        # === Stage 3: Feed Forward ===
+        # Feed Forward (通道维度增强)
         x_norm = self.norm_ff(x)
         x = x + self.ff(x_norm)
         
@@ -233,6 +290,8 @@ class Model(nn.Module):
         self.d_ff = getattr(configs, 'd_ff', 256)
         self.e_layers = getattr(configs, 'e_layers', 2)
         self.dropout = getattr(configs, 'dropout', 0.1)
+        # 混合顺序: 'cm' = Channel→MLP, 'mc' = MLP→Channel
+        self.attention_order = getattr(configs, 'attention_order', 'cm')
         
         # 1. RevIN (保持 affine=True)
         self.revin = RevIN(self.enc_in, affine=True)
@@ -240,15 +299,15 @@ class Model(nn.Module):
         # 2. Embedding
         self.embeddings = nn.Parameter(torch.randn(1, self.d_model))
         
-        # 3. Position Encoding (为 Attention 提供位置信息)
+        # 3. Position Encoding (为 Channel Attention 提供位置信息)
         self.pos_enc = PositionalEncoding(self.d_model, max_len=max(self.seq_len, 512))
         
         # 4. Frequency Learner (FreTS Part)
         self.freq_learner = FrequencyTemporalLearner(self.seq_len, self.d_model)
         
-        # 5. CSformer Layers (Replacing TimeDomainMixer)
+        # 5. CSformer Layers (Channel Attention + Temporal MLP)
         self.csformer_layers = nn.ModuleList([
-            CSformerLayer(self.d_model, self.n_heads, self.d_ff, self.dropout)
+            CSformerLayer(self.d_model, self.n_heads, self.d_ff, self.seq_len, self.dropout, self.attention_order)
             for _ in range(self.e_layers)
         ])
         

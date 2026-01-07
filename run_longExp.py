@@ -58,6 +58,8 @@ parser.add_argument('--factor', type=int, default=1, help='attn factor') # Atten
 parser.add_argument('--distil', action='store_false',
                     help='whether to use distilling in encoder, using this argument means not using distilling',
                     default=True) # 蒸馏操作：是否在 Encoder 层之间使用卷积池化减少维度（默认开启）
+parser.add_argument('--attention_order', type=str, default='cm', 
+                    help='attention order: cs=Channel->Sequence (default), sc=Sequence->Channel')
 parser.add_argument('--dropout', type=float, default=0.05, help='dropout') # Dropout比率：防止过拟合
 parser.add_argument('--embed', type=str, default='timeF',
                     help='time features encoding, options:[timeF, fixed, learned]') # 时间编码方式：timeF为基于频率通过模型生成，fixed为正弦余弦编码，learned为可学习Embedding

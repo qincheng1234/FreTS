@@ -1,6 +1,6 @@
 from data_provider.data_factory import data_provider
 from exp.exp_basic import Exp_Basic
-from models import DLinear, NLinear, FreTS
+from models import DLinear, NLinear, FreTS, FreTS_Mixer, FreTS_Hybrid
 from utils.tools import EarlyStopping, adjust_learning_rate, visual, test_params_flop
 from utils.metrics import metric
 # from FrequencyLoss import UniversalFrequencyLoss  # 已移除频域损失
@@ -29,7 +29,9 @@ class Exp_Main(Exp_Basic):
             'DLinear': DLinear,
             'NLinear': NLinear,
             'FreLinear': FreTS,
-            'FreTS': FreTS  # 支持两种命名
+            'FreTS': FreTS,             # FreTS-CSformer Hybrid
+            'FreTS_Mixer': FreTS_Mixer, # FreTS-Mixer (标准 Block 架构)
+            'FreTS_Hybrid': FreTS_Hybrid # FreTS-Hybrid (深度重构版)
         }
         model = model_dict[self.args.model].Model(self.args).float()
 
@@ -39,7 +41,7 @@ class Exp_Main(Exp_Basic):
 
     def _is_simple_model(self):
         """判断是否为简单模型（只需要 batch_x 输入）"""
-        simple_models = ['Linear', 'FreTS', 'FreLinear']
+        simple_models = ['Linear', 'FreTS', 'FreLinear', 'FreTS_Mixer', 'FreTS_Hybrid']
         return any(m in self.args.model for m in simple_models)
 
     def _get_data(self, flag):
