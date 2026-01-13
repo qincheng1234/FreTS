@@ -23,7 +23,7 @@ def data_provider(args, flag):
 
     if flag == 'test':
         shuffle_flag = False
-        drop_last = True
+        drop_last = False  # 修复: 不丢弃最后一个不完整的 batch，确保小测试集能被正确评估
         batch_size = args.batch_size
         freq = args.freq
     elif flag == 'pred':

@@ -144,86 +144,179 @@ class SharedMultiHeadAttention(nn.Module):
         return self.out_proj(out)
 
 
-class TemporalMLP(nn.Module):
+class RMSNorm(nn.Module):
     """
-    [新增] 时间维 MLP - 替代 Sequence Attention
-    
-    设计灵感：
-    - iTransformer: 将时间步视为 token，在时间维上做 FFN
-    - DLinear: 简单的线性层直接映射时间序列
-    - TSMixer: Time-MLP 用于捕获时序依赖
-    
-    优势：
-    1. 计算复杂度 O(T) vs Attention 的 O(T²)
-    2. 无需位置编码，因为 MLP 隐式建模时序位置
-    3. 参数量更少，更不容易过拟合
+    [新增] RMSNorm: 比 LayerNorm 更稳定，适合 Linear Attention 的 QK 归一化
+    用于防止高维输入导致的梯度爆炸/消失
     """
-    def __init__(self, seq_len, d_model, expansion_factor=2, dropout=0.1):
+    def __init__(self, d_model, eps=1e-5):
         super().__init__()
-        hidden_dim = int(seq_len * expansion_factor)
-        
-        # 时间维 MLP: [B*N, T, D] -> 转置 -> [B*N, D, T] -> MLP -> 转置回来
-        self.temporal_fc = nn.Sequential(
-            nn.Linear(seq_len, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, seq_len),
-            nn.Dropout(dropout)
-        )
-        self.norm = nn.LayerNorm(d_model)
-    
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(d_model))
+
     def forward(self, x):
-        # x: [B, N, T, D]
+        norm = torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        return x * norm * self.weight
+
+
+
+# ============================================
+# TEA + Channel MLP 架构 (MEAformer 风格)
+# ============================================
+
+class TemporalExternalAttention(nn.Module):
+    """
+    时间外部注意力 (Temporal External Attention, TEA)
+    
+    论文参考: 
+    - "Beyond Self-attention: External Attention using Two Linear Layers"
+    - "MEAformer: An all-MLP transformer with temporal external attention"
+    
+    核心思想：
+    - 用两个可学习的线性层 (M_k, M_v) 替代 Self-Attention 的 Q@K^T 和 A@V
+    - 记忆单元 M 在整个数据集上共享，捕获跨样本的全局时序模式
+    
+    复杂度: O(L * S)，其中 S << L，实现线性复杂度
+    """
+    def __init__(self, d_model, memory_size=64):
+        """
+        Args:
+            d_model: 输入特征维度
+            memory_size (S): 外部记忆单元数量，控制模型的"记忆容量"
+        """
+        super().__init__()
+        self.d_model = d_model
+        self.memory_size = memory_size
+        
+        # 外部记忆矩阵
+        # M_k: 键记忆，用于计算注意力权重
+        # M_v: 值记忆，用于特征重构
+        self.M_k = nn.Linear(d_model, memory_size, bias=False)
+        self.M_v = nn.Linear(memory_size, d_model, bias=False)
+        
+        # 初始化
+        nn.init.xavier_uniform_(self.M_k.weight)
+        nn.init.xavier_uniform_(self.M_v.weight)
+        
+    def forward(self, x):
+        """
+        Args:
+            x: [B, N, T, D] - 输入特征
+        Returns:
+            out: [B, N, T, D] - 输出特征
+        """
         B, N, T, D = x.shape
         
-        # Reshape and transpose for temporal mixing
-        x_reshaped = x.reshape(B * N, T, D)  # [B*N, T, D]
-        x_norm = self.norm(x_reshaped)
+        # Reshape: [B, N, T, D] -> [B*N, T, D]
+        x = x.reshape(B * N, T, D)
         
-        # Transpose to apply MLP along time dimension
-        x_t = x_norm.transpose(1, 2)  # [B*N, D, T]
-        x_t = self.temporal_fc(x_t)   # [B*N, D, T]
-        x_out = x_t.transpose(1, 2)   # [B*N, T, D]
+        # Step 1: 计算注意力权重
+        # attn = x @ M_k^T -> [B*N, T, S]
+        attn = self.M_k(x)
         
-        # Residual connection
-        x_out = x_reshaped + x_out
-        return x_out.reshape(B, N, T, D)
+        # Step 2: 双重归一化 (Double Normalization)
+        # 这是 External Attention 的关键：先 Softmax，再 L1 归一化
+        attn = F.softmax(attn, dim=-1)  # 对 S 维度 Softmax
+        attn = attn / (attn.sum(dim=1, keepdim=True) + 1e-6)  # 对 T 维度 L1 归一化
+        
+        # Step 3: 特征重构
+        # out = attn @ M_v -> [B*N, T, D]
+        out = self.M_v(attn)
+        
+        # Reshape back: [B*N, T, D] -> [B, N, T, D]
+        out = out.reshape(B, N, T, D)
+        
+        return out
 
 
-class CSformerLayer(nn.Module):
+class ChannelMLP(nn.Module):
     """
-    [改进版] CSformer 混合层 - 将 Sequence Attention 替换为 Temporal MLP
+    自适应 Channel MLP (Adaptive Channel MLP)
     
-    支持两种混合顺序：
-    - 'cm': Channel Attention → Temporal MLP (类似 CSformer 原设计)
-    - 'mc': Temporal MLP → Channel Attention (先做时序汇聚再做通道交互)
+    根据通道数自动选择最优结构：
+    - N > 100 (如 Traffic): Bottleneck 结构 (N -> N/16 -> N)
+      利用 Low-Rank 属性，防止过拟合
+    - N <= 100 (如 ETT, Weather): Expansion 结构 (N -> N*2 -> N)
+      保留足够的表达能力
     
-    设计理念：
-    - Channel Attention: 动态建模通道间的全局依赖关系
-    - Temporal MLP: 高效的时序位置感知混合（类似 DLinear/iTransformer）
-    
-    优势：
-    1. 降低计算复杂度: O(N²·T + N·T) vs O(N²·T + T²·N)
-    2. 减少参数量和过拟合风险
-    3. TimeMLP 对周期性模式的捕获更直接
-    
-    采用 Pre-Norm 结构，提升训练稳定性
+    这样可以同时适应高维和低维数据集
     """
-    def __init__(self, d_model, n_heads, d_ff, seq_len, dropout=0.1, attention_order='cm'):
+    def __init__(self, num_channels, dropout=0.1):
+        """
+        Args:
+            num_channels: 输入通道数 (N)
+            dropout: Dropout 比率
+        """
         super().__init__()
-        self.attention_order = attention_order
+        self.num_channels = num_channels
         
-        # Channel Attention 模块
-        self.channel_attn = SharedMultiHeadAttention(d_model, n_heads, dropout)
-        self.norm_channel = nn.LayerNorm(d_model)
+        # 自适应选择隐藏层维度
+        if num_channels > 100:
+            # 高维数据 (如 Traffic N=862): 使用 Bottleneck
+            # 瓶颈维度 = N/16，最小为 32
+            self.hidden_dim = max(32, num_channels // 16)
+            self.mode = 'bottleneck'
+        else:
+            # 低维数据 (如 ETT N=7, Weather N=21): 使用 Expansion
+            # 扩展维度 = N*2，最小为 16
+            self.hidden_dim = max(16, num_channels * 4)
+            self.mode = 'expansion'
         
-        # Temporal MLP 模块 (替代 Sequence Attention)
-        self.temporal_mlp = TemporalMLP(seq_len, d_model, expansion_factor=2, dropout=dropout)
+        # MLP 层
+        self.fc1 = nn.Linear(num_channels, self.hidden_dim)
+        self.fc2 = nn.Linear(self.hidden_dim, num_channels)
         
-        # Final Layer Norm
-        self.norm_ff = nn.LayerNorm(d_model)
+        self.act = nn.GELU()
+        self.dropout = nn.Dropout(dropout)
         
-        # Feed Forward Network (通道维度)
+    def forward(self, x):
+        """
+        Args:
+            x: [B, N, T, D] - 输入特征
+        Returns:
+            out: [B, N, T, D] - 输出特征
+        """
+        B, N, T, D = x.shape
+        
+        # 转置：[B, N, T, D] -> [B, T, D, N]
+        x = x.permute(0, 2, 3, 1)
+        
+        # MLP: N -> hidden -> N
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.dropout(x)
+        x = self.fc2(x)
+        x = self.dropout(x)
+        
+        # 转置回来：[B, T, D, N] -> [B, N, T, D]
+        x = x.permute(0, 3, 1, 2)
+        
+        return x
+
+
+
+class TEABlock(nn.Module):
+    """
+    TEA + Adaptive Channel MLP 组合模块
+    
+    架构: Temporal External Attention -> Adaptive Channel MLP -> FFN
+    
+    Channel MLP 自动选择:
+    - N > 100: Bottleneck (N/16)
+    - N <= 100: Expansion (N*4)
+    """
+    def __init__(self, d_model, num_channels, d_ff, memory_size=64, dropout=0.1):
+        super().__init__()
+        
+        # 1. Temporal External Attention
+        self.tea = TemporalExternalAttention(d_model, memory_size=memory_size)
+        self.norm1 = nn.LayerNorm(d_model)
+        
+        # 2. Adaptive Channel MLP (自动选择 Bottleneck 或 Expansion)
+        self.channel_mlp = ChannelMLP(num_channels, dropout=dropout)
+        self.norm2 = nn.LayerNorm(d_model)
+        
+        # 3. Feed Forward Network
         self.ff = nn.Sequential(
             nn.Linear(d_model, d_ff),
             nn.GELU(),
@@ -231,54 +324,48 @@ class CSformerLayer(nn.Module):
             nn.Linear(d_ff, d_model),
             nn.Dropout(dropout)
         )
+        self.norm3 = nn.LayerNorm(d_model)
+        
         self.dropout = nn.Dropout(dropout)
-
-    def _channel_attention(self, x):
-        """Channel MSA: 通道混合"""
-        B, N, T, D = x.shape
-        x_c = x.permute(0, 2, 1, 3).reshape(B * T, N, D)
-        x_c_norm = self.norm_channel(x_c)
-        attn_out = self.channel_attn(x_c_norm)
-        x_c = x_c + self.dropout(attn_out)
-        return x_c.reshape(B, T, N, D).permute(0, 2, 1, 3)
-    
-    def _temporal_mixing(self, x):
-        """Temporal MLP: 时序混合"""
-        return self.temporal_mlp(x)
-
+        
     def forward(self, x):
-        # Input x: [Batch, Channel(N), Time(T), D_model]
+        """
+        Args:
+            x: [B, N, T, D] - 输入特征
+        Returns:
+            out: [B, N, T, D] - 输出特征
+        """
+        # 1. Temporal External Attention (Pre-Norm)
+        residual = x
+        x = self.norm1(x)
+        x = residual + self.dropout(self.tea(x))
         
-        if self.attention_order == 'cm':
-            # Channel Attention → Temporal MLP
-            # 适合通道相关性强的数据，先汇聚通道信息再做时序混合
-            x = self._channel_attention(x)
-            x = self._temporal_mixing(x)
-        else:  # 'mc'
-            # Temporal MLP → Channel Attention  
-            # 适合时序模式先于通道交互的场景
-            x = self._temporal_mixing(x)
-            x = self._channel_attention(x)
+        # 2. Channel MLP (Pre-Norm)
+        residual = x
+        x = self.norm2(x)
+        x = residual + self.dropout(self.channel_mlp(x))
         
-        # Feed Forward (通道维度增强)
-        x_norm = self.norm_ff(x)
-        x = x + self.ff(x_norm)
+        # 3. Feed Forward (Pre-Norm)
+        residual = x
+        x = self.norm3(x)
+        x = residual + self.ff(x)
         
         return x
 
 
+
 class Model(nn.Module):
     """
-    FreTS-CSformer Hybrid v1
+    FreTS + TEA-MLP 混合架构
     
     架构设计：
     - 前端 (FreTS): ComplexLinear + FFT 频域全局去噪和长周期特征提取
-    - 后端 (CSformer): Two-Stage Attention 动态处理时间/通道依赖
+    - 后端 (TEA + C-MLP): Temporal External Attention + Channel MLP
     
     核心优势：
-    1. 频域滤波 + 动态注意力的组合
-    2. 共享权重降低过拟合风险
-    3. Pre-Norm 结构提升训练稳定性
+    1. 频域滤波 + 外部记忆的组合
+    2. TEA 以 O(L) 线性复杂度处理长序列
+    3. ChannelMLP 高效处理多变量交互
     """
     def __init__(self, configs):
         super(Model, self).__init__()
@@ -286,28 +373,28 @@ class Model(nn.Module):
         self.pred_len = configs.pred_len
         self.enc_in = configs.enc_in
         self.d_model = getattr(configs, 'd_model', 128)
-        self.n_heads = getattr(configs, 'n_heads', 4)
         self.d_ff = getattr(configs, 'd_ff', 256)
         self.e_layers = getattr(configs, 'e_layers', 2)
         self.dropout = getattr(configs, 'dropout', 0.1)
-        # 混合顺序: 'cm' = Channel→MLP, 'mc' = MLP→Channel
-        self.attention_order = getattr(configs, 'attention_order', 'cm')
+        # TEA 外部记忆单元数量
+        self.memory_size = getattr(configs, 'memory_size', 64)
         
-        # 1. RevIN (保持 affine=True)
-        self.revin = RevIN(self.enc_in, affine=True)
+        # 1. RevIN (可配置 affine, Traffic 建议设为 False)
+        self.affine = getattr(configs, 'rev_affine', True) 
+        self.revin = RevIN(self.enc_in, affine=self.affine)
         
         # 2. Embedding
         self.embeddings = nn.Parameter(torch.randn(1, self.d_model))
         
-        # 3. Position Encoding (为 Channel Attention 提供位置信息)
+        # 3. Position Encoding (为时间维度提供位置信息)
         self.pos_enc = PositionalEncoding(self.d_model, max_len=max(self.seq_len, 512))
         
         # 4. Frequency Learner (FreTS Part)
         self.freq_learner = FrequencyTemporalLearner(self.seq_len, self.d_model)
         
-        # 5. CSformer Layers (Channel Attention + Temporal MLP)
-        self.csformer_layers = nn.ModuleList([
-            CSformerLayer(self.d_model, self.n_heads, self.d_ff, self.seq_len, self.dropout, self.attention_order)
+        # 5. TEA Blocks (Temporal External Attention + Channel MLP)
+        self.tea_blocks = nn.ModuleList([
+            TEABlock(self.d_model, self.enc_in, self.d_ff, memory_size=self.memory_size, dropout=self.dropout)
             for _ in range(self.e_layers)
         ])
         
@@ -357,9 +444,9 @@ class Model(nn.Module):
         x_feat = self.pos_enc(x_feat, T)
         x_feat = x_feat.reshape(B, N, T, D)
         
-        # 5. CSformer Layers (Dynamic Two-Stage Mixing)
-        for layer in self.csformer_layers:
-            x_feat = layer(x_feat)
+        # 5. TEA Blocks (Temporal EA + Channel MLP)
+        for block in self.tea_blocks:
+            x_feat = block(x_feat)
         
         # 6. Final Norm
         x_feat = self.final_norm(x_feat)

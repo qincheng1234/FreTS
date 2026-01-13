@@ -54,8 +54,18 @@ class Exp_Main(Exp_Basic):
 
     def _select_criterion(self):
         """选择损失函数"""
-        # 纯 MSE Loss（时域损失）
-        criterion = nn.MSELoss()
+        if self.args.loss == 'mse':
+            criterion = nn.MSELoss()
+        elif self.args.loss == 'mae':
+            criterion = nn.L1Loss()
+        elif self.args.loss == 'huber':
+            criterion = nn.HuberLoss(delta=1.0)
+        elif self.args.loss == 'smooth_l1':
+            criterion = nn.SmoothL1Loss()
+        else:
+            print(f"Warning: Unknown loss function {self.args.loss}, utilizing MSELoss.")
+            criterion = nn.MSELoss()
+        
         return criterion
 
     def vali(self, vali_data, vali_loader, criterion):
@@ -315,13 +325,13 @@ class Exp_Main(Exp_Basic):
         if self.args.test_flop:
             test_params_flop((batch_x.shape[1],batch_x.shape[2]))
             exit()
-        preds = np.array(preds)
-        trues = np.array(trues)
-        inputx = np.array(inputx)
+        
+        # 使用 concatenate 替代 array，以处理不同 batch size 的情况
+        preds = np.concatenate(preds, axis=0)
+        trues = np.concatenate(trues, axis=0)
+        inputx = np.concatenate(inputx, axis=0)
 
-        preds = preds.reshape(-1, preds.shape[-2], preds.shape[-1])
-        trues = trues.reshape(-1, trues.shape[-2], trues.shape[-1])
-        inputx = inputx.reshape(-1, inputx.shape[-2], inputx.shape[-1])
+        # preds/trues/inputx 已经是 [total_samples, pred_len, channels] 格式，无需 reshape
 
         # result save
         folder_path = './results/' + setting + '/'
