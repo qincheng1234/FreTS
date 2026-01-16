@@ -229,17 +229,21 @@ class TemporalExternalAttention(nn.Module):
         return out
 
 
-class ChannelMLP(nn.Module):
+class ChannelExternalAttention(nn.Module):
     """
-    自适应 Channel MLP (Adaptive Channel MLP)
+    通道外部注意力 (Channel External Attention, CEA)
     
-    根据通道数自动选择最优结构：
-    - N > 100 (如 Traffic): Bottleneck 结构 (N -> N/16 -> N)
-      利用 Low-Rank 属性，防止过拟合
-    - N <= 100 (如 ETT, Weather): Expansion 结构 (N -> N*2 -> N)
-      保留足够的表达能力
+    核心改进（相比 ChannelMLP）:
+    1. 动态记忆查询: 根据输入内容动态调整通道混合策略
+    2. 全局数据集知识: 通过共享记忆矩阵 M_k, M_v 捕获跨样本模式
+    3. 低秩正则化: 记忆瓶颈天然过滤噪声
     
-    这样可以同时适应高维和低维数据集
+    数学形式:
+    - A = Softmax(x @ M_k^T)  # 计算与记忆原型的相似度
+    - A = A / sum(A, dim=-2)  # L1 归一化 (双重归一化)
+    - out = A @ M_v           # 基于记忆原型重构特征
+    
+    复杂度: O(S·C)，其中 S << C，远低于 MLP 的 O(C²)
     """
     def __init__(self, num_channels, dropout=0.1):
         """
@@ -250,23 +254,27 @@ class ChannelMLP(nn.Module):
         super().__init__()
         self.num_channels = num_channels
         
-        # 自适应选择隐藏层维度
+        # 自适应记忆大小
         if num_channels > 100:
-            # 高维数据 (如 Traffic N=862): 使用 Bottleneck
-            # 瓶颈维度 = N/16，最小为 32
-            self.hidden_dim = max(32, num_channels // 16)
-            self.mode = 'bottleneck'
+            # 高维 (如 Traffic N=862): 使用较大记忆库
+            # 记忆大小 = N/8，捕捉更多模式
+            self.memory_size = max(32, num_channels // 8)
+            self.mode = 'high_dim'
         else:
-            # 低维数据 (如 ETT N=7, Weather N=21): 使用 Expansion
-            # 扩展维度 = N*2，最小为 16
-            self.hidden_dim = max(16, num_channels * 4)
-            self.mode = 'expansion'
+            # 低维 (如 ETT N=7, Weather N=21): 记忆大小 ≈ 4N
+            self.memory_size = max(8, num_channels * 4)
+            self.mode = 'low_dim'
         
-        # MLP 层
-        self.fc1 = nn.Linear(num_channels, self.hidden_dim)
-        self.fc2 = nn.Linear(self.hidden_dim, num_channels)
+        # 外部记忆矩阵
+        # M_k: 键记忆，用于计算注意力权重 (相当于聚类中心)
+        # M_v: 值记忆，存储重构模式 (相当于原型特征)
+        self.M_k = nn.Linear(num_channels, self.memory_size, bias=False)
+        self.M_v = nn.Linear(self.memory_size, num_channels, bias=False)
         
-        self.act = nn.GELU()
+        # 初始化: 正交初始化帮助记忆单元分散
+        nn.init.orthogonal_(self.M_k.weight)
+        nn.init.orthogonal_(self.M_v.weight)
+        
         self.dropout = nn.Dropout(dropout)
         
     def forward(self, x):
@@ -281,29 +289,36 @@ class ChannelMLP(nn.Module):
         # 转置：[B, N, T, D] -> [B, T, D, N]
         x = x.permute(0, 2, 3, 1)
         
-        # MLP: N -> hidden -> N
-        x = self.fc1(x)
-        x = self.act(x)
-        x = self.dropout(x)
-        x = self.fc2(x)
-        x = self.dropout(x)
+        # Step 1: 计算注意力权重 (与记忆原型的相似度)
+        # [B, T, D, N] @ [N, S] -> [B, T, D, S]
+        attn = self.M_k(x)
+        
+        # Step 2: 双重归一化 (Double Normalization)
+        # 这是 External Attention 的关键，确保梯度稳定
+        attn = F.softmax(attn, dim=-1)           # Softmax over S (记忆维度)
+        attn = attn / (attn.sum(dim=-2, keepdim=True) + 1e-6)  # L1 norm over D
+        
+        # Step 3: 基于记忆重构特征
+        # [B, T, D, S] @ [S, N] -> [B, T, D, N]
+        out = self.M_v(attn)
+        out = self.dropout(out)
         
         # 转置回来：[B, T, D, N] -> [B, N, T, D]
-        x = x.permute(0, 3, 1, 2)
+        out = out.permute(0, 3, 1, 2)
         
-        return x
+        return out
 
 
 
 class TEABlock(nn.Module):
     """
-    TEA + Adaptive Channel MLP 组合模块
+    TEA + Channel External Attention 组合模块
     
-    架构: Temporal External Attention -> Adaptive Channel MLP -> FFN
+    架构: Temporal External Attention -> Channel External Attention -> FFN
     
-    Channel MLP 自动选择:
-    - N > 100: Bottleneck (N/16)
-    - N <= 100: Expansion (N*4)
+    双重外部注意力设计:
+    - TEA: 时间维度的外部记忆 (捕获全局时序模式)
+    - CEA: 通道维度的外部记忆 (捕获全局通道相关性)
     """
     def __init__(self, d_model, num_channels, d_ff, memory_size=64, dropout=0.1):
         super().__init__()
@@ -312,8 +327,8 @@ class TEABlock(nn.Module):
         self.tea = TemporalExternalAttention(d_model, memory_size=memory_size)
         self.norm1 = nn.LayerNorm(d_model)
         
-        # 2. Adaptive Channel MLP (自动选择 Bottleneck 或 Expansion)
-        self.channel_mlp = ChannelMLP(num_channels, dropout=dropout)
+        # 2. Channel External Attention (替换 ChannelMLP)
+        self.channel_attn = ChannelExternalAttention(num_channels, dropout=dropout)
         self.norm2 = nn.LayerNorm(d_model)
         
         # 3. Feed Forward Network
@@ -327,6 +342,7 @@ class TEABlock(nn.Module):
         self.norm3 = nn.LayerNorm(d_model)
         
         self.dropout = nn.Dropout(dropout)
+
         
     def forward(self, x):
         """
@@ -340,10 +356,10 @@ class TEABlock(nn.Module):
         x = self.norm1(x)
         x = residual + self.dropout(self.tea(x))
         
-        # 2. Channel MLP (Pre-Norm)
+        # 2. Channel External Attention (Pre-Norm)
         residual = x
         x = self.norm2(x)
-        x = residual + self.dropout(self.channel_mlp(x))
+        x = residual + self.dropout(self.channel_attn(x))
         
         # 3. Feed Forward (Pre-Norm)
         residual = x
