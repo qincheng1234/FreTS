@@ -16,8 +16,8 @@ parser = argparse.ArgumentParser(description='Linear family for Time Series Fore
 parser.add_argument('--is_training', type=int, default=1, help='status') # 状态：1为训练模式，0为测试/预测模式
 parser.add_argument('--train_only', type=bool, default=False, help='perform training on full input dataset without validation and testing') # 仅训练：是否用全部数据训练而不进行验证和测试
 parser.add_argument('--model_id', type=str, default='ETTm1', help='model id') # 模型ID：用于标识实验，通常包含数据集名称
-parser.add_argument('--model', type=str, default='FreLinear',
-                    help='model name, options: [NLinear, DLinear, FreLinear]') # 模型名称：选择要运行的模型，如 FreLinear, DLinear 等
+parser.add_argument('--model', type=str, default='FreDEA',
+                    help='model name, options: [FreDEA, DLinear, NLinear]') # 模型名称：选择要运行的模型，如 FreDEA等
 
 # data loader
 parser.add_argument('--data', type=str, default='ETTm1', help='dataset type') # 数据集类型：对应 data_factory 中的 key，指定使用哪种数据集类
@@ -60,7 +60,11 @@ parser.add_argument('--distil', action='store_false',
                     default=True) # 蒸馏操作：是否在 Encoder 层之间使用卷积池化减少维度（默认开启）
 parser.add_argument('--rev_affine', type=int, default=1, help='RevIN affine')
 parser.add_argument('--memory_size', type=int, default=64, help='TEA external memory size (recommended: 64-128)')
-parser.add_argument('--dropout', type=float, default=0.05, help='dropout') # Dropout比率：防止过拟合
+parser.add_argument('--bottleneck_dim', type=int, default=-1, help='Projection head bottleneck dim. 1=simple bottleneck, -1=full projection (for Exchange)')
+parser.add_argument('--ablation_freq', type=int, default=0, help='Ablation: remove frequency branch (1=remove, 0=keep)')
+parser.add_argument('--ablation_tea', type=int, default=0, help='Ablation: remove TEA module (1=remove, 0=keep)')
+parser.add_argument('--ablation_cea', type=int, default=0, help='Ablation: remove CEA module (1=remove, 0=keep)')
+parser.add_argument('--dropout', type=float, default=0.05, help='dropout')
 parser.add_argument('--embed', type=str, default='timeF',
                     help='time features encoding, options:[timeF, fixed, learned]') # 时间编码方式：timeF为基于频率通过模型生成，fixed为正弦余弦编码，learned为可学习Embedding
 parser.add_argument('--activation', type=str, default='gelu', help='activation') # 激活函数

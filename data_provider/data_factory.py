@@ -1,4 +1,4 @@
-from data_provider.data_loader import Dataset_Covid, Dataset_Custom, Dataset_Pred, Dataset_Custom_, Dataset_ETT_hour, Dataset_ETT_minute
+from data_provider.data_loader import Dataset_Covid, Dataset_Custom, Dataset_Pred, Dataset_Custom_, Dataset_ETT_hour, Dataset_ETT_minute, Dataset_Solar
 from torch.utils.data import DataLoader
 
 data_dict = {
@@ -10,6 +10,7 @@ data_dict = {
     'electricity': Dataset_Custom_,
     'exchange': Dataset_Custom_,
     'weather': Dataset_Custom_,
+    'solar': Dataset_Solar,    # Solar-Energy: 137变量太阳能数据
     'covid': Dataset_Covid,
     'ECG': Dataset_Custom_,
     'metr': Dataset_Custom_,
