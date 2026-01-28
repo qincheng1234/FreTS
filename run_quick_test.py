@@ -21,16 +21,10 @@ except ImportError:
 
 # 定义要测试的子集 (按优先级排序)
 # 格式: '数据集名称': [预测步长列表]
-# [V15 验证] DPEM 风格 Feature-Time Fusion 架构全面验证
+# [V25_Final] 只测试 Electricity 验证通道自适应分解效果
 from collections import OrderedDict
 TEST_TARGETS = OrderedDict([
-    # 核心验证: 全数据集全步长
-    ('ETTh1', [96, 192, 336, 720]),
-    ('ETTh2', [96, 192, 336, 720]),
-    ('ETTm1', [96, 192, 336, 720]),
-    ('ETTm2', [96, 192, 336, 720]),
-    ('exchange', [96, 192, 336, 720]),
-    ('weather', [96, 192, 336, 720]),
+    # 只测试 Electricity
     ('electricity', [96, 192, 336, 720]),
 ])
 
