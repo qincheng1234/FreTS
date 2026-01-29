@@ -173,7 +173,7 @@ PRED_LENS = [96, 192, 336, 720]
 COMMON_PARAMS = {
     'seq_len': 96,
     'train_epochs': 20,
-    'patience': 5,
+    'patience': 100,  # [关闭早停] 设为极大值
     'itr': 1,
     'num_workers': 8,  # 8-10 for 14 vCPUs
     'use_amp': False,   # [用户请求] 关闭混合精度，防止副作用

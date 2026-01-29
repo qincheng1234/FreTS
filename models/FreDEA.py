@@ -321,9 +321,9 @@ class Model(nn.Module):
         )
         
         # -----------------------------------------------------------
-        # [融合层] 相加后过线性层
+        # [融合门控] 可学习的趋势/季节权重
         # -----------------------------------------------------------
-        self.fusion_linear = nn.Linear(self.pred_len, self.pred_len)
+        self.fusion_logit = nn.Parameter(torch.tensor(0.0))
         
         self._init_weights()
     
