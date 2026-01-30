@@ -147,22 +147,22 @@ DATASET_CONFIGS = {
             # [V9] 深度优先策略 (Depth > Width)
             # 解决 V8 (d=128, layers=1) 失败的问题: 复杂序列需要深度
             # 保持 d_model=64 以配合 e_layers=2 避免 OOM
-            96: {'d_model': 256, 'd_ff': 128, 'e_layers': 2, 'memory_size': 64,
+            96: {'d_model': 128, 'd_ff': 128, 'e_layers': 2, 'memory_size': 256,
                  'bottleneck_dim': 2, 'dropout': 0.1, 'batch_size': 16,
-                 'learning_rate': 0.0005, 'lradj': '3'},
-            192: {'d_model': 256, 'd_ff': 128, 'e_layers': 2, 'memory_size': 64,
+                 'learning_rate': 0.005, 'lradj': '3'},
+            192: {'d_model': 128, 'd_ff': 128, 'e_layers': 2, 'memory_size': 256,
                   'bottleneck_dim': 2, 'dropout': 0.1, 'batch_size': 16,
-                  'learning_rate': 0.0005, 'lradj': '3'},
+                  'learning_rate': 0.005, 'lradj': '3'},
             # [V14] 336步: 回退 e_layers=1, d_model=64 (历史最佳 0.1930)
             # V12 (layers=2) 导致性能下降 (0.1999)
-            336: {'d_model': 256, 'd_ff': 128, 'e_layers': 1, 'memory_size': 64,
+            336: {'d_model': 128, 'd_ff': 128, 'e_layers': 1, 'memory_size': 256,
                   'bottleneck_dim': 2, 'dropout': 0.1, 'batch_size': 16,
-                  'learning_rate': 0.0005, 'lradj': '3'},
+                  'learning_rate': 0.005, 'lradj': '3'},
             # [V14] 720步: 回退 e_layers=1, 但 d_model=128 (历史最佳 0.2267)
             # V12 (layers=2, d=64) 性能较差 (0.2372)
-            720: {'d_model': 128, 'd_ff': 128, 'e_layers': 1, 'memory_size': 128,
+            720: {'d_model': 128, 'd_ff': 128, 'e_layers': 1, 'memory_size': 256,
                   'bottleneck_dim': 4, 'dropout': 0.1, 'batch_size': 16,
-                  'learning_rate': 0.0005, 'lradj': '3'},
+                  'learning_rate': 0.005, 'lradj': '3'},
         }
     },
 }
