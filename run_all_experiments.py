@@ -82,20 +82,21 @@ DATASET_CONFIGS = {
         'data_path': 'ETTh2.csv',
         'enc_in': 7,
         'configs': {
-            # [V9] 回退 d_model=64 (V8 128 过拟合)
+            # [V27] ETTh2 优化: rev_affine=0 (关闭可学习仿射，减少非平稳过拟合)
+            # 96/192: fusion_init=3.0 偏向趋势
             96: {'d_model': 64, 'd_ff': 128, 'e_layers': 1, 'memory_size': 64,
-                 'bottleneck_dim': -1, 'dropout': 0.0, 'batch_size': 32,
-                 'learning_rate': 0.001, 'lradj': 'type1'},
+                 'bottleneck_dim': -1, 'dropout': 0.15, 'batch_size': 32,
+                 'learning_rate': 0.001, 'lradj': 'type1', 'fusion_init': 3.0, 'rev_affine': 0},
             192: {'d_model': 64, 'd_ff': 128, 'e_layers': 1, 'memory_size': 64,
-                  'bottleneck_dim': -1, 'dropout': 0.0, 'batch_size': 32,
-                  'learning_rate': 0.001, 'lradj': 'type1'},
+                  'bottleneck_dim': -1, 'dropout': 0.15, 'batch_size': 32,
+                  'learning_rate': 0.001, 'lradj': 'type1', 'fusion_init': 3.0, 'rev_affine': 0},
+            # 336/720: 默认平衡，关闭 rev_affine
             336: {'d_model': 64, 'd_ff': 128, 'e_layers': 1, 'memory_size': 64,
                   'bottleneck_dim': -1, 'dropout': 0.2, 'batch_size': 32,
-                  'learning_rate': 0.001, 'lradj': 'type1'},
-            # [V9] 720: 适当增加 dropout 至 0.45
+                  'learning_rate': 0.001, 'lradj': 'type1', 'rev_affine': 0},
             720: {'d_model': 64, 'd_ff': 128, 'e_layers': 1, 'memory_size': 64,
                   'bottleneck_dim': 1, 'dropout': 0.45, 'batch_size': 32,
-                  'learning_rate': 0.0003, 'lradj': 'type1'},
+                  'learning_rate': 0.0003, 'lradj': 'type1', 'rev_affine': 0},
         }
     },
     'exchange': {
@@ -113,12 +114,12 @@ DATASET_CONFIGS = {
             # [V12] 336步: 保持 rev_affine=0 (最佳MSE 0.33)
             336: {'d_model': 32, 'd_ff': 64, 'e_layers': 1, 'memory_size': 32,
                   'bottleneck_dim': 1, 'dropout': 0.65, 'batch_size': 32,
-                  'learning_rate': 0.0005, 'lradj': '3', 'rev_affine': 0},
+                  'learning_rate': 0.0005, 'lradj': 'type1', 'rev_affine': 0},
             # [V14] 720步: 恢复 dropout=0.6 (历史最佳 0.8558)
             # V13 (0.7) 导致欠拟合 (0.897)
             720: {'d_model': 32, 'd_ff': 64, 'e_layers': 1, 'memory_size': 32,
                   'bottleneck_dim': 1, 'dropout': 0.6, 'batch_size': 32,
-                  'learning_rate': 0.0005, 'lradj': '3', 'rev_affine': 1},
+                  'learning_rate': 0.0005, 'lradj': 'type1', 'rev_affine': 1},
         }
     },
     'weather': {
@@ -146,22 +147,22 @@ DATASET_CONFIGS = {
             # [V9] 深度优先策略 (Depth > Width)
             # 解决 V8 (d=128, layers=1) 失败的问题: 复杂序列需要深度
             # 保持 d_model=64 以配合 e_layers=2 避免 OOM
-            96: {'d_model': 64, 'd_ff': 128, 'e_layers': 2, 'memory_size': 64,
-                 'bottleneck_dim': 2, 'dropout': 0.05, 'batch_size': 16,
-                 'learning_rate': 0.0005, 'lradj': 'type1'},
-            192: {'d_model': 64, 'd_ff': 128, 'e_layers': 2, 'memory_size': 64,
-                  'bottleneck_dim': 2, 'dropout': 0.05, 'batch_size': 16,
-                  'learning_rate': 0.0005, 'lradj': 'type1'},
+            96: {'d_model': 256, 'd_ff': 128, 'e_layers': 2, 'memory_size': 64,
+                 'bottleneck_dim': 2, 'dropout': 0.1, 'batch_size': 16,
+                 'learning_rate': 0.0005, 'lradj': '3'},
+            192: {'d_model': 256, 'd_ff': 128, 'e_layers': 2, 'memory_size': 64,
+                  'bottleneck_dim': 2, 'dropout': 0.1, 'batch_size': 16,
+                  'learning_rate': 0.0005, 'lradj': '3'},
             # [V14] 336步: 回退 e_layers=1, d_model=64 (历史最佳 0.1930)
             # V12 (layers=2) 导致性能下降 (0.1999)
-            336: {'d_model': 64, 'd_ff': 128, 'e_layers': 1, 'memory_size': 64,
-                  'bottleneck_dim': 2, 'dropout': 0.15, 'batch_size': 16,
-                  'learning_rate': 0.0005, 'lradj': 'type1'},
+            336: {'d_model': 256, 'd_ff': 128, 'e_layers': 1, 'memory_size': 64,
+                  'bottleneck_dim': 2, 'dropout': 0.1, 'batch_size': 16,
+                  'learning_rate': 0.0005, 'lradj': '3'},
             # [V14] 720步: 回退 e_layers=1, 但 d_model=128 (历史最佳 0.2267)
             # V12 (layers=2, d=64) 性能较差 (0.2372)
-            720: {'d_model': 128, 'd_ff': 256, 'e_layers': 1, 'memory_size': 128,
+            720: {'d_model': 128, 'd_ff': 128, 'e_layers': 1, 'memory_size': 128,
                   'bottleneck_dim': 4, 'dropout': 0.1, 'batch_size': 16,
-                  'learning_rate': 0.0005, 'lradj': 'type1'},
+                  'learning_rate': 0.0005, 'lradj': '3'},
         }
     },
 }
@@ -173,7 +174,7 @@ PRED_LENS = [96, 192, 336, 720]
 COMMON_PARAMS = {
     'seq_len': 96,
     'train_epochs': 20,
-    'patience': 100,  # [关闭早停] 设为极大值
+    'patience': 8,  # [关闭早停] 设为极大值
     'itr': 1,
     'num_workers': 8,  # 8-10 for 14 vCPUs
     'use_amp': False,   # [用户请求] 关闭混合精度，防止副作用
@@ -247,6 +248,11 @@ def build_command(dataset, pred_len, config):
     if 'rev_affine' in pred_config:
         cmd.append('--rev_affine')
         cmd.append(str(pred_config['rev_affine']))
+    
+    # [新增 V26] 支持 Fusion Init 配置 (ETTh2 优化)
+    if 'fusion_init' in pred_config:
+        cmd.append('--fusion_init')
+        cmd.append(str(pred_config['fusion_init']))
     
     if COMMON_PARAMS['use_amp']:
         cmd.append('--use_amp')

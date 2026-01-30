@@ -304,26 +304,31 @@ class Model(nn.Module):
         self.seasonal_time_proj = nn.Linear(self.seq_len, self.pred_len)
         
         # -----------------------------------------------------------
-        # [自适应 Dropout] 长序列增强正则化
+        # [自适应 Dropout] 长序列增强正则化 (修复版)
+        # 336+ 步都需要更强的正则化
         # -----------------------------------------------------------
         if self.pred_len >= 720:
-            time_dropout = max(0.3, self.dropout)
+            time_dropout = max(0.35, self.dropout)
+        elif self.pred_len >= 336:
+            time_dropout = max(0.25, self.dropout)
         else:
             time_dropout = self.dropout
         self.dropout_time = nn.Dropout(time_dropout)
         
-        # Feature MLP
+        # Feature MLP - [关键修复] 使用 time_dropout 而非 self.dropout
         self.seasonal_out_mlp = nn.Sequential(
             nn.Linear(self.d_model, self.d_model * 2),
             nn.GELU(),
-            nn.Dropout(self.dropout),
+            nn.Dropout(time_dropout),  # <-- 修复：长序列时也强正则化
             nn.Linear(self.d_model * 2, 1)
         )
         
         # -----------------------------------------------------------
         # [融合门控] 可学习的趋势/季节权重
+        # fusion_init: 0.0 = 平衡, 3.0 = 偏向趋势 (sigmoid(3.0)≈0.95)
         # -----------------------------------------------------------
-        self.fusion_logit = nn.Parameter(torch.tensor(0.0))
+        fusion_init = getattr(configs, 'fusion_init', 0.0)
+        self.fusion_logit = nn.Parameter(torch.tensor(fusion_init))
         
         self._init_weights()
     

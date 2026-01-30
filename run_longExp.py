@@ -65,6 +65,7 @@ parser.add_argument('--ablation_freq', type=int, default=0, help='Ablation: remo
 parser.add_argument('--ablation_tea', type=int, default=0, help='Ablation: remove TEA module (1=remove, 0=keep)')
 parser.add_argument('--ablation_cea', type=int, default=0, help='Ablation: remove CEA module (1=remove, 0=keep)')
 parser.add_argument('--dropout', type=float, default=0.05, help='dropout')
+parser.add_argument('--fusion_init', type=float, default=0.0, help='Initial value for fusion gate logit (0.0=balanced, 3.0=trend-bias for ETTh2)')
 parser.add_argument('--embed', type=str, default='timeF',
                     help='time features encoding, options:[timeF, fixed, learned]') # 时间编码方式：timeF为基于频率通过模型生成，fixed为正弦余弦编码，learned为可学习Embedding
 parser.add_argument('--activation', type=str, default='gelu', help='activation') # 激活函数
