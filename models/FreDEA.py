@@ -36,38 +36,44 @@ class RevIN(nn.Module):
         return x
 
 
-class ComplexLinear(nn.Module):
-    """复数线性层"""
-    def __init__(self, in_features, out_features):
-        super(ComplexLinear, self).__init__()
-        self.fc_r = nn.Linear(in_features, out_features)
-        self.fc_i = nn.Linear(in_features, out_features)
+class PhasePreservingFreqMixer(nn.Module):
+    """
+    保相频域混合器 (Phase-Preserving Frequency Mixer, PPFM)
     
-    def forward(self, x):
-        real = self.fc_r(x.real) - self.fc_i(x.imag)
-        imag = self.fc_r(x.imag) + self.fc_i(x.real)
-        return torch.complex(real, imag)
-
-
-class FrequencyTemporalLearner(nn.Module):
-    """频域时序学习器"""
-    def __init__(self, seq_len, d_model):
-        super(FrequencyTemporalLearner, self).__init__()
+    核心思想：使用纯实数权重矩阵 W∈R^{F×F} 在频域对各频率分量进行
+    交叉混合 (Cross-Frequency Mixing)。由于 W 为实数，对复数频谱的
+    乘法等价于在极坐标下仅重组幅度、严格保持原始相位不变，从而为下游
+    TEA 模块提供拓扑一致的无损先验特征。
+    
+    数学公式：X̂_out[k] = Σ_f W[k,f] · X̂_in[f]
+    其中 W 为可学习的实数矩阵，X̂ 为复数频谱。
+    """
+    def __init__(self, seq_len):
+        super(PhasePreservingFreqMixer, self).__init__()
         self.seq_len = seq_len
-        self.complex_weight = ComplexLinear(seq_len // 2 + 1, seq_len // 2 + 1)
+        self.freq_len = seq_len // 2 + 1
+        
+        # 实数混合权重 [F, F]，仅使用 fc_r.weight 参与前向传播
+        self.fc_r = nn.Linear(self.freq_len, self.freq_len)
+        # fc_i 不参与前向计算，保留以维持模块树结构一致性
+        self.fc_i = nn.Linear(self.freq_len, self.freq_len)
 
     def forward(self, x):
+        # x: [B, N, T, D]
         B, N, T, D = x.shape
-        x = x.permute(0, 1, 3, 2)
-        x_freq = torch.fft.rfft(x, dim=-1, norm='ortho')
-        x_freq = x_freq.permute(0, 1, 3, 2)
-        x_freq = x_freq.reshape(B * N, x_freq.shape[2], D)
-        weight = self.complex_weight.fc_r.weight.to(dtype=x_freq.dtype)
-        x_freq = torch.einsum('bfd,kf->bkd', x_freq, weight)
-        x_freq = x_freq.reshape(B, N, x_freq.shape[1], D)
-        x_freq = x_freq.permute(0, 1, 3, 2)
-        x_time = torch.fft.irfft(x_freq, n=T, dim=-1, norm='ortho')
-        x_time = x_time.permute(0, 1, 3, 2)
+        x = x.permute(0, 1, 3, 2)                                    # [B, N, D, T]
+        x_freq = torch.fft.rfft(x, dim=-1, norm='ortho')             # [B, N, D, F]
+        x_freq = x_freq.permute(0, 1, 3, 2)                          # [B, N, F, D]
+        x_freq = x_freq.reshape(B * N, x_freq.shape[2], D)           # [BN, F, D]
+        
+        # 纯实数矩阵 × 复数频谱 → 幅度重组 + 相位保持
+        weight = self.fc_r.weight.to(dtype=x_freq.dtype)              # [F, F]
+        x_freq = torch.einsum('bfd,kf->bkd', x_freq, weight)         # [BN, K, D]
+        
+        x_freq = x_freq.reshape(B, N, x_freq.shape[1], D)            # [B, N, F, D]
+        x_freq = x_freq.permute(0, 1, 3, 2)                          # [B, N, D, F]
+        x_time = torch.fft.irfft(x_freq, n=T, dim=-1, norm='ortho')  # [B, N, D, T]
+        x_time = x_time.permute(0, 1, 3, 2)                          # [B, N, T, D]
         return x_time
 
 
@@ -290,7 +296,7 @@ class Model(nn.Module):
         # -----------------------------------------------------------
         self.embeddings = nn.Parameter(torch.randn(1, self.d_model))
         self.pos_enc = PositionalEncoding(self.d_model, max_len=max(self.seq_len, 512))
-        self.freq_learner = FrequencyTemporalLearner(self.seq_len, self.d_model)
+        self.freq_learner = PhasePreservingFreqMixer(self.seq_len)
         
         self.tea_blocks = nn.ModuleList([
             TEABlock(self.d_model, self.seq_len, self.enc_in, self.d_ff, 
