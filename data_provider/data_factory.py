@@ -17,6 +17,46 @@ data_dict = {
 }
 
 
+def register_dataset(name: str, dataset_cls):
+    """在运行时注册自定义数据集类，解决白盒审查卡点 D。
+
+    传入 data_factory.data_dict 中没有的数据集名称时，
+    可通过本函数在实验脚本中动态注册，而无需修改源文件。
+
+    Parameters
+    ----------
+    name : str
+        数据集标识符，与 --data 命令行参数对应。
+    dataset_cls : type
+        实现了与 Dataset_Custom 相同接口的 PyTorch Dataset 类，
+        即构造函数接受 (root_path, data_path, flag, size,
+        features, target, timeenc, freq, train_only) 参数。
+
+    Raises
+    ------
+    TypeError
+        当 dataset_cls 不是 type（类）时抛出。
+
+    Examples
+    --------
+    >>> from data_provider.data_factory import register_dataset
+    >>> from data_provider.data_loader import Dataset_Custom_
+    >>>
+    >>> # 注册新数据集（复用已有 loader）
+    >>> register_dataset('my_dataset', Dataset_Custom_)
+    >>>
+    >>> # 或注册完全自定义的 Dataset
+    >>> class MyDataset(torch.utils.data.Dataset):
+    ...     def __init__(self, root_path, data_path, flag, size,
+    ...                  features, target, timeenc, freq, train_only):
+    ...         ...
+    >>> register_dataset('my_dataset', MyDataset)
+    """
+    if not isinstance(dataset_cls, type):
+        raise TypeError(f"dataset_cls must be a class, got {dataset_cls!r}")
+    data_dict[name] = dataset_cls
+
+
 def data_provider(args, flag):
     Data = data_dict[args.data]
     timeenc = 0 if args.embed != 'timeF' else 1
