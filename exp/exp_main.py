@@ -295,8 +295,13 @@ class Exp_Main(Exp_Basic):
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
 
+        moe_enable = int(getattr(self.args, 'moe_enable', 0))
+        moe_stats_enable = int(getattr(self.args, 'moe_stats_enable', 1))
+        batch_behavior_log = []
+        criterion_mse = nn.MSELoss()
+
         self.model.eval()
-        if int(getattr(self.args, 'moe_enable', 0)) and int(getattr(self.args, 'moe_stats_enable', 1)):
+        if moe_enable and moe_stats_enable:
             model_ref = self._unwrap_model()
             if hasattr(model_ref, 'reset_moe_stats'):
                 model_ref.reset_moe_stats()
@@ -336,6 +341,46 @@ class Exp_Main(Exp_Basic):
                 # print(outputs.shape,batch_y.shape)
                 outputs = outputs[:, -self.args.pred_len:, f_dim:]
                 batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
+
+                # --- MoE routing behavior logging (before detach) ---
+                if moe_enable:
+                    batch_mse = criterion_mse(outputs, batch_y).item()
+
+                    # Crest factor per sample: C_i = max(|Δx|) / σ(x).
+                    # max(|Δx|) captures the largest single-step transient spike;
+                    # dividing by σ(x) normalises by signal scale so the ratio is
+                    # high only for sequences with sharp local jumps, which are exactly
+                    # the events the Wavelet expert is designed to handle.
+                    diff = batch_x[:, 1:, :] - batch_x[:, :-1, :]         # [B, T-1, N]
+                    max_abs_diff = diff.abs().amax(dim=(1, 2))             # [B]
+                    sigma_x = batch_x.reshape(batch_x.shape[0], -1).std(dim=-1)  # [B]
+                    crest_per_sample = max_abs_diff / (sigma_x + 1e-8)    # [B]
+                    batch_crest_factor = crest_per_sample.mean().item()
+
+                    model_ref = self._unwrap_model()
+                    denoise_moe = getattr(model_ref, 'denoise_moe', None)
+                    gate_probs = getattr(denoise_moe, 'gate_probs_store', None)
+                    expert_names = getattr(denoise_moe, 'expert_names', [])
+
+                    prob_vmd = 0.0
+                    prob_wavelet = 0.0
+                    if gate_probs is not None:
+                        mean_probs = gate_probs.detach().cpu().mean(dim=0)  # [E]
+                        for ei, ename in enumerate(expert_names):
+                            if ename == 'vmd':
+                                prob_vmd = float(mean_probs[ei])
+                            elif ename == 'wavelet':
+                                prob_wavelet = float(mean_probs[ei])
+
+                    batch_behavior_log.append({
+                        'batch_idx': i,
+                        'batch_mse': batch_mse,
+                        'prob_vmd': prob_vmd,
+                        'prob_wavelet': prob_wavelet,
+                        'batch_crest_factor': batch_crest_factor,
+                    })
+                # --- end MoE logging ---
+
                 outputs = outputs.detach().cpu().numpy()
                 batch_y = batch_y.detach().cpu().numpy()
 
@@ -378,7 +423,7 @@ class Exp_Main(Exp_Basic):
 
         # np.save(folder_path + 'metrics.npy', np.array([mae, mse, rmse, mape, mspe,rse, corr]))
         np.save(folder_path + 'pred.npy', preds)
-        if int(getattr(self.args, 'moe_enable', 0)) and int(getattr(self.args, 'moe_stats_enable', 1)):
+        if moe_enable and moe_stats_enable:
             model_ref = self._unwrap_model()
             if hasattr(model_ref, 'get_moe_stats'):
                 stats = model_ref.get_moe_stats()
@@ -391,6 +436,9 @@ class Exp_Main(Exp_Basic):
                             to_save[k] = v
                     with open(folder_path + 'moe_stats.json', 'w', encoding='utf-8') as f_json:
                         json.dump(to_save, f_json, ensure_ascii=False, indent=2)
+            if batch_behavior_log:
+                df_behavior = pd.DataFrame(batch_behavior_log)
+                df_behavior.to_csv(folder_path + 'routing_behavior_log.csv', index=False)
         # np.save(folder_path + 'true.npy', trues)
         # np.save(folder_path + 'x.npy', inputx)
         return

@@ -2,6 +2,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# Registry that maps lower-case expert names to factory lambdas(num_channels, seq_len).
+_EXPERT_MAP = {
+    'wavelet': lambda nc, sl: WaveletLikeExpert(num_channels=nc),
+    'ssa': lambda nc, sl: SSALikeExpert(seq_len=sl, rank=max(8, sl // 6)),
+    'vmd': lambda nc, sl: VMDLikeExpert(seq_len=sl, num_modes=4),
+    'nlm': lambda nc, sl: NLMLikeExpert(temperature=0.5),
+}
+
 
 class WaveletLikeExpert(nn.Module):
     """Wavelet-like denoiser via depthwise smoothing + soft threshold on high-frequency residual."""
@@ -95,20 +103,63 @@ class NLMLikeExpert(nn.Module):
 
 
 class DenoiseGate(nn.Module):
-    """Lightweight gate over experts using statistics and spectrum ratio features."""
+    """
+    Dual-track gate: backward-compatible manual statistics router (manual)
+    and adaptive 1D-CNN dual-pool router (neural_v2).
 
-    def __init__(self, num_experts: int, hidden_dim: int = 32, topk: int = 2, temperature: float = 1.0):
+    router_type='manual':
+        Uses six hand-crafted statistics (mean, std, kurtosis, variance,
+        spectral high-frequency ratio, etc.) derived from the input signal.
+        Lightweight and interpretable; good baseline for ablation studies.
+
+    router_type='neural_v2':
+        Uses a two-layer 1D-CNN to extract latent features, then applies
+        dual-channel pooling (Avg-pool for smooth global context suited to the
+        VMD/periodic expert; Max-pool for high-frequency spike detection suited
+        to the Wavelet/transient expert). Learns an adaptive routing policy
+        at the cost of additional parameters.
+    """
+
+    def __init__(self, num_experts: int, num_channels: int = 1,
+                 router_type: str = 'manual', hidden_dim: int = 32,
+                 topk: int = 2, temperature: float = 1.0):
         super(DenoiseGate, self).__init__()
         self.topk = max(1, topk)
         self.temperature = temperature
-        self.net = nn.Sequential(
-            nn.Linear(6, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, num_experts),
-        )
+        self.router_type = router_type
+
+        if self.router_type == 'manual':
+            # Backward-compatible [B, 6] instance-level statistics router.
+            self.net = nn.Sequential(
+                nn.Linear(6, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, num_experts),
+            )
+        elif self.router_type == 'neural_v2':
+            # Lightweight 1D-CNN with dual-channel pooling (Avg + Max).
+            # Avg-pool captures smooth global context (suited for VMD/periodic experts).
+            # Max-pool captures high-frequency spikes (suited for Wavelet/transient experts).
+            self.cnn = nn.Sequential(
+                nn.Conv1d(in_channels=num_channels, out_channels=hidden_dim,
+                          kernel_size=3, padding=1),
+                nn.BatchNorm1d(hidden_dim),
+                nn.GELU(),
+                nn.Conv1d(in_channels=hidden_dim, out_channels=hidden_dim,
+                          kernel_size=3, padding=1),
+                nn.BatchNorm1d(hidden_dim),
+                nn.GELU(),
+            )
+            self.fc = nn.Sequential(
+                nn.Linear(hidden_dim * 2, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, num_experts),
+            )
+        else:
+            raise ValueError(f"Unsupported router_type: {router_type!r}. "
+                             "Choose 'manual' or 'neural_v2'.")
 
     def _extract_features(self, x):
-        # x: [B,N,T]
+        # x: [B, N, T]
         mean = x.mean(dim=(1, 2))
         std = x.std(dim=(1, 2), unbiased=False)
         abs_mean = x.abs().mean(dim=(1, 2))
@@ -128,9 +179,19 @@ class DenoiseGate(nn.Module):
         return feats
 
     def forward(self, x):
-        feats = self._extract_features(x)
-        logits = self.net(feats) / max(self.temperature, 1e-6)
-        probs = F.softmax(logits, dim=-1)
+        # x: [B, N, T]
+        if self.router_type == 'manual':
+            feats = self._extract_features(x)    # [B, 6]
+            logits = self.net(feats)              # [B, num_experts]
+        else:
+            feat_t = self.cnn(x)                  # [B, hidden_dim, T]
+            pool_avg = feat_t.mean(dim=-1)        # [B, hidden_dim]
+            pool_max = feat_t.max(dim=-1)[0]      # [B, hidden_dim]
+            feats = torch.cat([pool_avg, pool_max], dim=-1)  # [B, hidden_dim*2]
+            logits = self.fc(feats)               # [B, num_experts]
+
+        logits = logits / max(self.temperature, 1e-6)
+        probs = F.softmax(logits, dim=-1)         # [B, num_experts]
 
         if self.topk >= probs.shape[-1]:
             return probs
@@ -153,25 +214,48 @@ class DenoiseMoE(nn.Module):
         topk: int = 2,
         gate_hidden: int = 32,
         gate_temp: float = 1.0,
+        router_type: str = 'manual',
+        expert_names: str = '',
     ):
         super(DenoiseMoE, self).__init__()
-        self.num_experts = num_experts
-        self.experts = nn.ModuleList([
-            WaveletLikeExpert(num_channels=num_channels),
-            SSALikeExpert(seq_len=seq_len, rank=max(8, seq_len // 6)),
-            VMDLikeExpert(seq_len=seq_len, num_modes=4),
-            NLMLikeExpert(temperature=0.5),
-        ])
-        if num_experts < len(self.experts):
-            self.experts = nn.ModuleList(list(self.experts)[:num_experts])
 
+        # Build expert list from name registry when provided; fall back to legacy ordering.
+        if expert_names:
+            names = [n.strip().lower() for n in expert_names.split(',') if n.strip()]
+            for n in names:
+                if n not in _EXPERT_MAP:
+                    raise ValueError(
+                        f"Unknown expert name {n!r}. "
+                        f"Valid options: {list(_EXPERT_MAP.keys())}"
+                    )
+            self.experts = nn.ModuleList(
+                [_EXPERT_MAP[n](num_channels, seq_len) for n in names]
+            )
+            self.expert_names = names
+        else:
+            # Legacy default ordering: Wavelet, SSA, VMD, NLM
+            default_experts = [
+                WaveletLikeExpert(num_channels=num_channels),
+                SSALikeExpert(seq_len=seq_len, rank=max(8, seq_len // 6)),
+                VMDLikeExpert(seq_len=seq_len, num_modes=4),
+                NLMLikeExpert(temperature=0.5),
+            ]
+            if num_experts < len(default_experts):
+                default_experts = default_experts[:num_experts]
+            self.experts = nn.ModuleList(default_experts)
+            self.expert_names = ['wavelet', 'ssa', 'vmd', 'nlm'][:len(self.experts)]
+
+        self.num_experts = len(self.experts)
         self.gate = DenoiseGate(
-            num_experts=len(self.experts),
+            num_experts=self.num_experts,
+            num_channels=num_channels,
+            router_type=router_type,
             hidden_dim=gate_hidden,
             topk=topk,
             temperature=gate_temp,
         )
-        self.output_scale = nn.Parameter(torch.ones(len(self.experts)))
+        self.output_scale = nn.Parameter(torch.ones(self.num_experts))
+        self.gate_probs_store = None  # Populated in forward(); used for behavior logging.
         self._latest_stats = {}
         self.reset_stats()
 
@@ -214,6 +298,8 @@ class DenoiseMoE(nn.Module):
     def forward(self, x):
         # x: [B,N,T]
         weights = self.gate(x)  # [B,E]
+        # Store latest routing probabilities for external logging (e.g. test phase CSV).
+        self.gate_probs_store = weights
         expert_outputs = [expert(x) for expert in self.experts]
         scaled_outputs = []
         for idx, out in enumerate(expert_outputs):

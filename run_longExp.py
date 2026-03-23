@@ -75,6 +75,8 @@ parser.add_argument('--moe_gate_temp', type=float, default=1.0, help='Softmax te
 parser.add_argument('--moe_lb_loss_w', type=float, default=0.01, help='Load-balance auxiliary loss weight')
 parser.add_argument('--moe_div_loss_w', type=float, default=0.01, help='Diversity auxiliary loss weight')
 parser.add_argument('--moe_stats_enable', type=int, default=1, help='Save moe routing stats in test phase')
+parser.add_argument('--moe_experts', type=str, default='', help='Comma-separated expert names for MoE, e.g. vmd,wavelet or ssa,nlm. Empty means legacy 4-expert default.')
+parser.add_argument('--router_type', type=str, default='manual', choices=['manual', 'neural_v2'], help='Gate routing mechanism: manual (hand-crafted statistics) or neural_v2 (1D-CNN dual-pool)')
 parser.add_argument('--embed', type=str, default='timeF',
                     help='time features encoding, options:[timeF, fixed, learned]') # 时间编码方式：timeF为基于频率通过模型生成，fixed为正弦余弦编码，learned为可学习Embedding
 parser.add_argument('--activation', type=str, default='gelu', help='activation') # 激活函数

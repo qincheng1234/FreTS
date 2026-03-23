@@ -337,6 +337,8 @@ class Model(nn.Module):
                 topk=int(getattr(configs, 'moe_topk', 2)),
                 gate_hidden=int(getattr(configs, 'moe_gate_hidden', 32)),
                 gate_temp=float(getattr(configs, 'moe_gate_temp', 1.0)),
+                router_type=getattr(configs, 'router_type', 'manual'),
+                expert_names=getattr(configs, 'moe_experts', ''),
             )
         else:
             self.denoise_moe = None
