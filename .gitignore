@@ -1,3 +1,5 @@
 dataset/solar_AL.txt
 dataset/traffic.csv
 dataset/electricity.csv
+*.pyc
+__pycache__/
