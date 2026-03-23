@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+from models.moe_denoiser import DenoiseMoE
 
 
 class RevIN(nn.Module):
@@ -34,47 +35,6 @@ class RevIN(nn.Module):
             x = (x - self.affine_bias) / (self.affine_weight + 1e-10)
         x = x * self.stdev + self.mean
         return x
-
-
-class PhasePreservingFreqMixer(nn.Module):
-    """
-    保相频域混合器 (Phase-Preserving Frequency Mixer, PPFM)
-    
-    核心思想：使用纯实数权重矩阵 W∈R^{F×F} 在频域对各频率分量进行
-    交叉混合 (Cross-Frequency Mixing)。由于 W 为实数，对复数频谱的
-    乘法等价于在极坐标下仅重组幅度、严格保持原始相位不变，从而为下游
-    TEA 模块提供拓扑一致的无损先验特征。
-    
-    数学公式：X̂_out[k] = Σ_f W[k,f] · X̂_in[f]
-    其中 W 为可学习的实数矩阵，X̂ 为复数频谱。
-    """
-    def __init__(self, seq_len):
-        super(PhasePreservingFreqMixer, self).__init__()
-        self.seq_len = seq_len
-        self.freq_len = seq_len // 2 + 1
-        
-        # 实数混合权重 [F, F]，仅使用 fc_r.weight 参与前向传播
-        self.fc_r = nn.Linear(self.freq_len, self.freq_len)
-        # fc_i 不参与前向计算，保留以维持模块树结构一致性
-        self.fc_i = nn.Linear(self.freq_len, self.freq_len)
-
-    def forward(self, x):
-        # x: [B, N, T, D]
-        B, N, T, D = x.shape
-        x = x.permute(0, 1, 3, 2)                                    # [B, N, D, T]
-        x_freq = torch.fft.rfft(x, dim=-1, norm='ortho')             # [B, N, D, F]
-        x_freq = x_freq.permute(0, 1, 3, 2)                          # [B, N, F, D]
-        x_freq = x_freq.reshape(B * N, x_freq.shape[2], D)           # [BN, F, D]
-        
-        # 纯实数矩阵 × 复数频谱 → 幅度重组 + 相位保持
-        weight = self.fc_r.weight.to(dtype=x_freq.dtype)              # [F, F]
-        x_freq = torch.einsum('bfd,kf->bkd', x_freq, weight)         # [BN, K, D]
-        
-        x_freq = x_freq.reshape(B, N, x_freq.shape[1], D)            # [B, N, F, D]
-        x_freq = x_freq.permute(0, 1, 3, 2)                          # [B, N, D, F]
-        x_time = torch.fft.irfft(x_freq, n=T, dim=-1, norm='ortho')  # [B, N, D, T]
-        x_time = x_time.permute(0, 1, 3, 2)                          # [B, N, T, D]
-        return x_time
 
 
 class PositionalEncoding(nn.Module):
@@ -268,9 +228,14 @@ class Model(nn.Module):
         self.dropout = getattr(configs, 'dropout', 0.1)
         self.memory_size = getattr(configs, 'memory_size', 64)
         
-        self.ablation_freq = getattr(configs, 'ablation_freq', 0)
         self.ablation_tea = getattr(configs, 'ablation_tea', 0)
         self.ablation_cea = getattr(configs, 'ablation_cea', 0)
+        self.moe_enable = int(getattr(configs, 'moe_enable', 0))
+        self.moe_position = getattr(configs, 'moe_position', 'post_decomp')
+        self.moe_stats_enable = int(getattr(configs, 'moe_stats_enable', 1))
+
+        if self.moe_enable and self.moe_position != 'post_decomp':
+            raise ValueError(f"Unsupported moe_position={self.moe_position}. Only 'post_decomp' is supported.")
         
         # -----------------------------------------------------------
         # [自动 CI 策略] 高维数据自动关闭通道混合
@@ -296,7 +261,6 @@ class Model(nn.Module):
         # -----------------------------------------------------------
         self.embeddings = nn.Parameter(torch.randn(1, self.d_model))
         self.pos_enc = PositionalEncoding(self.d_model, max_len=max(self.seq_len, 512))
-        self.freq_learner = PhasePreservingFreqMixer(self.seq_len)
         
         self.tea_blocks = nn.ModuleList([
             TEABlock(self.d_model, self.seq_len, self.enc_in, self.d_ff, 
@@ -335,6 +299,20 @@ class Model(nn.Module):
         # -----------------------------------------------------------
         fusion_init = getattr(configs, 'fusion_init', 0.0)
         self.fusion_logit = nn.Parameter(torch.tensor(fusion_init))
+
+        if self.moe_enable and self.moe_position == 'post_decomp':
+            self.denoise_moe = DenoiseMoE(
+                seq_len=self.seq_len,
+                num_channels=self.enc_in,
+                num_experts=int(getattr(configs, 'moe_num_experts', 4)),
+                topk=int(getattr(configs, 'moe_topk', 2)),
+                gate_hidden=int(getattr(configs, 'moe_gate_hidden', 32)),
+                gate_temp=float(getattr(configs, 'moe_gate_temp', 1.0)),
+            )
+        else:
+            self.denoise_moe = None
+
+        self._moe_aux = None
         
         self._init_weights()
     
@@ -351,6 +329,21 @@ class Model(nn.Module):
     def tokenEmb(self, x):
         return x.unsqueeze(3) * self.embeddings
 
+    def get_moe_aux_losses(self):
+        if self.denoise_moe is None or self._moe_aux is None:
+            zero = self.fusion_logit.new_zeros(())
+            return zero, zero
+        return self._moe_aux['lb_loss'], self._moe_aux['div_loss']
+
+    def get_moe_stats(self):
+        if self.denoise_moe is None:
+            return {}
+        return self.denoise_moe.get_aggregated_stats()
+
+    def reset_moe_stats(self):
+        if self.denoise_moe is not None:
+            self.denoise_moe.reset_stats()
+
     def forward(self, x):
         # x: [B, T, N]
         
@@ -360,6 +353,11 @@ class Model(nn.Module):
         
         # 2. [V25_Refined] Decomposition (带 Stepness)
         x_seasonal, x_trend = self.decomposition(x)
+
+        if self.denoise_moe is not None:
+            x_seasonal, self._moe_aux = self.denoise_moe(x_seasonal)
+        else:
+            self._moe_aux = None
         
         # ==========================================
         # Branch 1: Trend Prediction (Simple Linear)
@@ -370,12 +368,7 @@ class Model(nn.Module):
         # Branch 2: Seasonal Prediction (Deep TEA)
         # ==========================================
         x_enc = self.tokenEmb(x_seasonal)  # [B, N, T, D]
-        
-        if not self.ablation_freq:
-            x_freq = self.freq_learner(x_enc)
-            x_feat = x_enc + x_freq
-        else:
-            x_feat = x_enc
+        x_feat = x_enc
             
         B, N, T, D = x_feat.shape
         x_feat = x_feat.reshape(B * N, T, D)

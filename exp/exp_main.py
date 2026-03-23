@@ -1,6 +1,6 @@
 from data_provider.data_factory import data_provider
 from exp.exp_basic import Exp_Basic
-from models import DLinear, NLinear, FreDEA, FreTS_Mixer, FreTS_Hybrid
+from models import DLinear, NLinear, FreDEA
 from utils.tools import EarlyStopping, adjust_learning_rate, visual, test_params_flop
 from utils.metrics import metric
 # from FrequencyLoss import UniversalFrequencyLoss  # 已移除频域损失
@@ -10,6 +10,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from torch import optim
+import json
 
 import os
 import time
@@ -29,9 +30,10 @@ class Exp_Main(Exp_Basic):
             'DLinear': DLinear,
             'NLinear': NLinear,
             'FreTS': FreDEA,             # Alias for compatibility
-            'FreDEA': FreDEA,            # New formal name
-            'FreTS_Mixer': FreTS_Mixer, # FreTS-Mixer (标准 Block 架构)
-            'FreTS_Hybrid': FreTS_Hybrid # FreTS-Hybrid (深度重构版)
+            'FreDEA': FreDEA             # New formal name
+            # 余下未定义的模型暂时注释，防止 NameError 阻断运行
+            # 'FreTS_Mixer': FreTS_Mixer, 
+            # 'FreTS_Hybrid': FreTS_Hybrid 
         }
         model = model_dict[self.args.model].Model(self.args).float()
 
@@ -41,7 +43,7 @@ class Exp_Main(Exp_Basic):
 
     def _is_simple_model(self):
         """判断是否为简单模型（只需要 batch_x 输入）"""
-        simple_models = ['Linear', 'FreTS', 'FreLinear', 'FreTS_Mixer', 'FreTS_Hybrid', 'FreDEA']
+        simple_models = ['Linear', 'FreTS',  'FreDEA']
         return any(m in self.args.model for m in simple_models)
 
     def _get_data(self, flag):
@@ -67,6 +69,11 @@ class Exp_Main(Exp_Basic):
             criterion = nn.MSELoss()
         
         return criterion
+
+    def _unwrap_model(self):
+        if isinstance(self.model, nn.DataParallel):
+            return self.model.module
+        return self.model
 
     def vali(self, vali_data, vali_loader, criterion):
         """验证函数"""
@@ -107,10 +114,7 @@ class Exp_Main(Exp_Basic):
                 outputs = outputs[:, -self.args.pred_len:, f_dim:]
                 batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
 
-                pred = outputs.detach().cpu()
-                true = batch_y.detach().cpu()
-
-                loss = criterion(pred, true)
+                loss = criterion(outputs, batch_y)
 
                 total_loss.append(loss.item())
         total_loss = np.average(total_loss)
@@ -163,6 +167,9 @@ class Exp_Main(Exp_Basic):
         for epoch in range(self.args.train_epochs):
             iter_count = 0
             train_loss = []
+            train_loss_main = []
+            train_loss_lb = []
+            train_loss_div = []
 
             self.model.train()
             epoch_time = time.time()
@@ -193,8 +200,18 @@ class Exp_Main(Exp_Basic):
                         f_dim = -1 if self.args.features == 'MS' else 0
                         outputs = outputs[:, -self.args.pred_len:, f_dim:]
                         batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
-                        loss = criterion(outputs, batch_y)
+                        loss_main = criterion(outputs, batch_y)
+                        model_ref = self._unwrap_model()
+                        if int(getattr(self.args, 'moe_enable', 0)) and hasattr(model_ref, 'get_moe_aux_losses'):
+                            lb_loss, div_loss = model_ref.get_moe_aux_losses()
+                        else:
+                            lb_loss = loss_main.new_zeros(())
+                            div_loss = loss_main.new_zeros(())
+                        loss = loss_main + self.args.moe_lb_loss_w * lb_loss + self.args.moe_div_loss_w * div_loss
                         train_loss.append(loss.item())
+                        train_loss_main.append(loss_main.item())
+                        train_loss_lb.append(lb_loss.item())
+                        train_loss_div.append(div_loss.item())
                 else:
                     if self._is_simple_model():
                         outputs = self.model(batch_x)
@@ -207,8 +224,18 @@ class Exp_Main(Exp_Basic):
                     f_dim = -1 if self.args.features == 'MS' else 0
                     outputs = outputs[:, -self.args.pred_len:, f_dim:]
                     batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
-                    loss = criterion(outputs, batch_y)
+                    loss_main = criterion(outputs, batch_y)
+                    model_ref = self._unwrap_model()
+                    if int(getattr(self.args, 'moe_enable', 0)) and hasattr(model_ref, 'get_moe_aux_losses'):
+                        lb_loss, div_loss = model_ref.get_moe_aux_losses()
+                    else:
+                        lb_loss = loss_main.new_zeros(())
+                        div_loss = loss_main.new_zeros(())
+                    loss = loss_main + self.args.moe_lb_loss_w * lb_loss + self.args.moe_div_loss_w * div_loss
                     train_loss.append(loss.item())
+                    train_loss_main.append(loss_main.item())
+                    train_loss_lb.append(lb_loss.item())
+                    train_loss_div.append(div_loss.item())
 
                 if (i + 1) % 100 == 0:
                     speed = (time.time() - time_now) / iter_count
@@ -227,6 +254,9 @@ class Exp_Main(Exp_Basic):
 
             epoch_cost = time.time() - epoch_time
             train_loss = np.average(train_loss)
+            train_loss_main = np.average(train_loss_main) if len(train_loss_main) > 0 else 0.0
+            train_loss_lb = np.average(train_loss_lb) if len(train_loss_lb) > 0 else 0.0
+            train_loss_div = np.average(train_loss_div) if len(train_loss_div) > 0 else 0.0
             
             print("\n" + "-"*60)
             if not self.args.train_only:
@@ -234,7 +264,7 @@ class Exp_Main(Exp_Basic):
                 test_loss = self.vali(test_data, test_loader, criterion)
 
                 print(f"  [Epoch {epoch+1:02d}] Summary | Time: {epoch_cost:.1f}s")
-                print(f"    Train Loss: {train_loss:.6f}")
+                print(f"    Train Loss: {train_loss:.6f} (main={train_loss_main:.6f}, lb={train_loss_lb:.6f}, div={train_loss_div:.6f})")
                 print(f"    Vali  Loss: {vali_loss:.6f}")
                 print(f"    Test  Loss: {test_loss:.6f}")
                 
@@ -272,6 +302,11 @@ class Exp_Main(Exp_Basic):
             os.makedirs(folder_path)
 
         self.model.eval()
+        if int(getattr(self.args, 'moe_enable', 0)) and int(getattr(self.args, 'moe_stats_enable', 1)):
+            model_ref = self._unwrap_model()
+            if hasattr(model_ref, 'reset_moe_stats'):
+                model_ref.reset_moe_stats()
+
         with torch.no_grad():
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(test_loader):
                 batch_x = batch_x.float().to(self.device)
@@ -349,6 +384,19 @@ class Exp_Main(Exp_Basic):
 
         # np.save(folder_path + 'metrics.npy', np.array([mae, mse, rmse, mape, mspe,rse, corr]))
         np.save(folder_path + 'pred.npy', preds)
+        if int(getattr(self.args, 'moe_enable', 0)) and int(getattr(self.args, 'moe_stats_enable', 1)):
+            model_ref = self._unwrap_model()
+            if hasattr(model_ref, 'get_moe_stats'):
+                stats = model_ref.get_moe_stats()
+                if len(stats) > 0:
+                    to_save = {}
+                    for k, v in stats.items():
+                        if hasattr(v, 'tolist'):
+                            to_save[k] = v.tolist()
+                        else:
+                            to_save[k] = v
+                    with open(folder_path + 'moe_stats.json', 'w', encoding='utf-8') as f_json:
+                        json.dump(to_save, f_json, ensure_ascii=False, indent=2)
         # np.save(folder_path + 'true.npy', trues)
         # np.save(folder_path + 'x.npy', inputx)
         return

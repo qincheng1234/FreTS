@@ -61,11 +61,20 @@ parser.add_argument('--distil', action='store_false',
 parser.add_argument('--rev_affine', type=int, default=1, help='RevIN affine')
 parser.add_argument('--memory_size', type=int, default=64, help='TEA external memory size (recommended: 64-128)')
 parser.add_argument('--bottleneck_dim', type=int, default=-1, help='Projection head bottleneck dim. 1=simple bottleneck, -1=full projection (for Exchange)')
-parser.add_argument('--ablation_freq', type=int, default=0, help='Ablation: remove frequency branch (1=remove, 0=keep)')
+parser.add_argument('--ablation_freq', type=int, default=0, help='[DEPRECATED] No effect after PPFM removal. Kept only for backward command compatibility.')
 parser.add_argument('--ablation_tea', type=int, default=0, help='Ablation: remove TEA module (1=remove, 0=keep)')
 parser.add_argument('--ablation_cea', type=int, default=0, help='Ablation: remove CEA module (1=remove, 0=keep)')
 parser.add_argument('--dropout', type=float, default=0.05, help='dropout')
 parser.add_argument('--fusion_init', type=float, default=0.0, help='Initial value for fusion gate logit (0.0=balanced, 3.0=trend-bias for ETTh2)')
+parser.add_argument('--moe_enable', type=int, default=0, help='Enable denoise MoE module (1=enable, 0=disable)')
+parser.add_argument('--moe_position', type=str, default='post_decomp', help='MoE insert position: post_decomp only for now')
+parser.add_argument('--moe_num_experts', type=int, default=4, help='Number of denoise experts')
+parser.add_argument('--moe_topk', type=int, default=2, help='Top-k sparse routing in gate')
+parser.add_argument('--moe_gate_hidden', type=int, default=32, help='Hidden dim of gate network')
+parser.add_argument('--moe_gate_temp', type=float, default=1.0, help='Softmax temperature in gate')
+parser.add_argument('--moe_lb_loss_w', type=float, default=0.01, help='Load-balance auxiliary loss weight')
+parser.add_argument('--moe_div_loss_w', type=float, default=0.01, help='Diversity auxiliary loss weight')
+parser.add_argument('--moe_stats_enable', type=int, default=1, help='Save moe routing stats in test phase')
 parser.add_argument('--embed', type=str, default='timeF',
                     help='time features encoding, options:[timeF, fixed, learned]') # 时间编码方式：timeF为基于频率通过模型生成，fixed为正弦余弦编码，learned为可学习Embedding
 parser.add_argument('--activation', type=str, default='gelu', help='activation') # 激活函数
@@ -92,6 +101,9 @@ parser.add_argument('--devices', type=str, default='0,1,2,3', help='device ids o
 parser.add_argument('--test_flop', action='store_true', default=False, help='See utils/tools for usage') # 计算FLOPs：是否计算模型浮点运算量
 
 args = parser.parse_args()
+
+if getattr(args, 'ablation_freq', 0):
+    print("[Warning] --ablation_freq is deprecated and has no effect after PPFM removal.")
 
 args.use_gpu = True if torch.cuda.is_available() and args.use_gpu else False
 
