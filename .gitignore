@@ -1,3 +1,8 @@
 dataset/solar_AL.txt
 dataset/traffic.csv
 dataset/electricity.csv
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
