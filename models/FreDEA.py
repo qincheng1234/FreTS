@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from models.moe_denoiser import DenoiseMoE
+from models.base_components import BaseDecomposer, BaseSeasonalProcessor
 
 
 class RevIN(nn.Module):
@@ -91,10 +92,13 @@ class ChannelExternalAttention(nn.Module):
         return out
 
 
-class TEABlock(nn.Module):
+class TEABlock(BaseSeasonalProcessor):
     """
     [V25] TEABlock with Sigmoid Gated CEA
-    
+
+    实现 BaseSeasonalProcessor 接口：
+      输入  [B, N, T, D]  →  输出  [B, N, T, D]
+
     Gate 被 Sigmoid 约束在 [0, 1] 之间，且初始化接近 0。
     这允许模型自动决定是否需要通道混合。
     """
@@ -146,15 +150,17 @@ class TEABlock(nn.Module):
 # V25_Refined: 条件分支频域分解 (带 Stepness 参数)
 # =============================================================================
 
-class ConditionalFreqDecomp(nn.Module):
+class ConditionalFreqDecomp(BaseDecomposer):
     """
-    [V25_Refined] 条件分支频域分解 (带 Stepness)
-    
+    [V25_Refined] 条件分支频域分解 (带 Stepness)，实现 BaseDecomposer 接口。
+
     改进：
     1. 条件分支：小维度共享 cutoff，高维度通道独立
     2. Stepness 参数：控制滤波器陡峭程度 sigmoid((cutoff-f)*stepness)
        - stepness 大：陡峭边界 (类似硬截断)
        - stepness 小：平滑过渡 (软滤波)
+
+    输入  [B, N, T]  →  输出  (x_seasonal, x_trend) 均为 [B, N, T]
     """
     def __init__(self, seq_len, enc_in):
         super(ConditionalFreqDecomp, self).__init__()
@@ -208,16 +214,28 @@ class ConditionalFreqDecomp(nn.Module):
 class Model(nn.Module):
     """
     FreDEA V25: Channel-Adaptive (Stabilized Single-Tower)
-    
+
     核心设计：
     1. 回归 V24 的单塔架构 (避免 V26 双塔过拟合)
     2. 升级分解模块为通道自适应 (解决 Electricity 321 维问题)
     3. 保留所有 V24_Refined 优化 (自动 CI、自适应 Dropout、门控融合)
-    
+
     这是折中的"黄金方案"：保持 ETTm 优势，同时修复 Electricity 短板。
+
+    扩展接口
+    ─────────
+    decomposer_cls : type, optional
+        实现 BaseDecomposer 的分解器类。默认使用 ConditionalFreqDecomp。
+        可传入任意继承自 BaseDecomposer 的自定义类来替换 FFT 分解策略，
+        例如::
+
+            class WaveletDecomp(BaseDecomposer):
+                def forward(self, x): ...  # [B,N,T] -> (seasonal, trend)
+
+            model = FreDEA.Model(configs, decomposer_cls=WaveletDecomp)
     """
 
-    def __init__(self, configs):
+    def __init__(self, configs, decomposer_cls=None):
         super(Model, self).__init__()
         self.seq_len = configs.seq_len
         self.pred_len = configs.pred_len
@@ -246,9 +264,20 @@ class Model(nn.Module):
         
         # 1. RevIN
         self.revin = RevIN(self.enc_in, affine=getattr(configs, 'rev_affine', True))
-        
-        # 2. [V25_Refined] Conditional Frequency Decomposition (带 Stepness)
-        self.decomposition = ConditionalFreqDecomp(self.seq_len, self.enc_in)
+
+        # 2. [V25_Refined] Decomposition — 支持通过 decomposer_cls 注入自定义实现
+        # 默认使用基于 FFT 的条件分支频域分解（ConditionalFreqDecomp）。
+        # 任何实现了 BaseDecomposer 接口的类均可作为替代传入。
+        # 注意：自定义分解器的构造函数须接受 (seq_len: int, enc_in: int) 两个位置参数。
+        if decomposer_cls is not None and not (
+            isinstance(decomposer_cls, type) and issubclass(decomposer_cls, BaseDecomposer)
+        ):
+            raise TypeError(
+                f"decomposer_cls must be a subclass of BaseDecomposer, got {decomposer_cls!r}"
+            )
+        if decomposer_cls is None:
+            decomposer_cls = ConditionalFreqDecomp
+        self.decomposition = decomposer_cls(self.seq_len, self.enc_in)
         
         # -----------------------------------------------------------
         # [Branch 1] Trend Modeling (Simple Linear)

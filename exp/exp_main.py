@@ -3,6 +3,7 @@ from exp.exp_basic import Exp_Basic
 from models import DLinear, NLinear, FreDEA
 from utils.tools import EarlyStopping, adjust_learning_rate, visual, test_params_flop
 from utils.metrics import metric
+from utils.loss_factory import build_criterion
 # from FrequencyLoss import UniversalFrequencyLoss  # 已移除频域损失
 
 import numpy as np
@@ -55,19 +56,12 @@ class Exp_Main(Exp_Basic):
         return model_optim
 
     def _select_criterion(self):
-        """选择损失函数"""
-        if self.args.loss == 'mse':
-            criterion = nn.MSELoss()
-        elif self.args.loss == 'mae':
-            criterion = nn.L1Loss()
-        elif self.args.loss == 'huber':
-            criterion = nn.HuberLoss(delta=1.0)
-        elif self.args.loss == 'smooth_l1':
-            criterion = nn.SmoothL1Loss()
-        else:
-            print(f"Warning: Unknown loss function {self.args.loss}, utilizing MSELoss.")
-            criterion = nn.MSELoss()
-        
+        """选择损失函数（通过 loss_factory 工厂构建，支持自定义扩展）。"""
+        try:
+            criterion = build_criterion(self.args.loss)
+        except ValueError:
+            print(f"Warning: Unknown loss function '{self.args.loss}', falling back to MSELoss.")
+            criterion = build_criterion('mse')
         return criterion
 
     def _unwrap_model(self):
